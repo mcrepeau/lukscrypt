@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VaultMgr</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d0d1a;
+    --surface:   #13131f;
+    --card:      #1a1a2e;
+    --card-hov:  #1f1f38;
+    --border:    #2a2a45;
+    --primary:   #5eead4;
+    --primary-d: #2dd4bf;
+    --success:   #4ade80;
+    --warning:   #fb923c;
+    --danger:    #f87171;
+    --text:      #e2e8f0;
+    --text-dim:  #64748b;
+    --text-muted:#94a3b8;
+    --mono:      'JetBrains Mono', 'Fira Code', monospace;
+    --radius:    10px;
+    --shadow:    0 4px 24px rgba(0,0,0,.4);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: -.3px;
+    color: var(--primary);
+  }
+  .logo svg { width: 22px; height: 22px; }
+  .logo-sub {
+    font-size: .75rem;
+    font-weight: 400;
+    color: var(--text-dim);
+    margin-left: 4px;
+    letter-spacing: .2px;
+  }
+
+  /* ── Main layout ── */
+  main { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.75rem;
+  }
+  .toolbar-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  #vault-count { color: var(--text-dim); font-weight: 400; margin-left: 6px; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    font-size: .8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s, opacity .15s, transform .1s;
+    white-space: nowrap;
+    line-height: 1;
+  }
+  .btn:active:not(:disabled) { transform: scale(.97); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  .btn-primary   { background: var(--primary);   color: #0d1117; border-color: var(--primary); }
+  .btn-primary:hover:not(:disabled)  { background: var(--primary-d); border-color: var(--primary-d); }
+  .btn-success   { background: var(--success);   color: #0d1117; border-color: var(--success); }
+  .btn-warning   { background: transparent; color: var(--warning); border-color: var(--warning); }
+  .btn-warning:hover:not(:disabled)  { background: rgba(251,146,60,.1); }
+  .btn-danger    { background: transparent; color: var(--danger);  border-color: var(--danger); }
+  .btn-danger:hover:not(:disabled)   { background: rgba(248,113,113,.1); }
+  .btn-ghost     { background: transparent; color: var(--text-muted); border-color: var(--border); }
+  .btn-ghost:hover:not(:disabled)    { background: var(--card-hov); }
+
+  /* ── Vault grid ── */
+  #vaults-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .vault-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: .9rem;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .vault-card:hover { border-color: #3a3a5a; box-shadow: var(--shadow); }
+  .vault-card.mounted  { border-left: 3px solid var(--success); }
+  .vault-card.unlocked { border-left: 3px solid var(--warning); }
+  .vault-card.locked   { border-left: 3px solid var(--border); }
+
+  .vault-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: .5rem;
+  }
+  .vault-name {
+    font-size: 1rem;
+    font-weight: 700;
+    word-break: break-word;
+  }
+
+  .badge {
+    flex-shrink: 0;
+    padding: 3px 9px;
+    border-radius: 20px;
+    font-size: .7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .badge-mounted  { background: rgba(74,222,128,.15); color: var(--success); }
+  .badge-unlocked { background: rgba(251,146,60,.15);  color: var(--warning); }
+  .badge-locked   { background: rgba(100,116,139,.15); color: var(--text-dim); }
+
+  .vault-meta {
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+  }
+  .meta-row {
+    display: flex;
+    gap: .5rem;
+    font-size: .78rem;
+    align-items: baseline;
+    line-height: 1.4;
+  }
+  .meta-label {
+    color: var(--text-dim);
+    width: 52px;
+    flex-shrink: 0;
+    font-size: .7rem;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    padding-top: 1px;
+  }
+  .meta-value { color: var(--text-muted); word-break: break-all; }
+  .meta-value.mono { font-family: var(--mono); font-size: .72rem; }
+
+  .vault-actions {
+    display: flex;
+    gap: .5rem;
+    flex-wrap: wrap;
+    padding-top: .25rem;
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Empty state ── */
+  .empty-state {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 5rem 2rem;
+    color: var(--text-dim);
+  }
+  .empty-state svg { width: 48px; height: 48px; margin-bottom: 1rem; opacity: .3; }
+  .empty-state p { font-size: 1rem; margin-bottom: .5rem; color: var(--text-muted); }
+  .empty-state small { font-size: .8rem; }
+
+  /* ── Modal backdrop ── */
+  .modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.65);
+    backdrop-filter: blur(3px);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+  }
+  .modal-backdrop.open { display: flex; }
+
+  .modal {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.75rem;
+    width: 100%;
+    max-width: 480px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6);
+    animation: slide-up .2s ease;
+  }
+  @keyframes slide-up {
+    from { transform: translateY(16px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+  }
+  .modal-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+  .modal-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .modal-close:hover { color: var(--text); background: var(--card-hov); }
+
+  /* ── Form ── */
+  .form-group { margin-bottom: 1rem; }
+  .form-label {
+    display: block;
+    margin-bottom: .4rem;
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+  }
+  .form-label span { color: var(--danger); margin-left: 2px; }
+  .form-hint { font-size: .72rem; color: var(--text-dim); margin-top: .25rem; }
+
+  select,
+  input[type="text"],
+  input[type="number"],
+  input[type="password"] {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    font-size: .85rem;
+    padding: 9px 12px;
+    outline: none;
+    transition: border-color .15s;
+    font-family: inherit;
+  }
+  select:focus,
+  input:focus { border-color: var(--primary); }
+  select { cursor: pointer; }
+  input[type="number"] { font-family: var(--mono); }
+  .input-row { display: flex; gap: .75rem; }
+  .input-row .form-group { flex: 1; }
+
+  .form-actions {
+    display: flex;
+    gap: .5rem;
+    justify-content: flex-end;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Progress panel ── */
+  .progress-modal { max-width: 520px; }
+
+  .steps-list {
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+    margin-bottom: 1.25rem;
+  }
+  .step-item {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    padding: .6rem .75rem;
+    border-radius: 7px;
+    font-size: .82rem;
+    color: var(--text-dim);
+    transition: background .2s, color .2s;
+  }
+  .step-item.active  { background: rgba(94,234,212,.07); color: var(--text); }
+  .step-item.done    { color: var(--success); }
+  .step-item.error   { background: rgba(248,113,113,.07); color: var(--danger); }
+
+  .step-icon {
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: .7rem;
+  }
+  .step-icon .spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .progress-bar-wrap {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: .75rem;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary), var(--success));
+    border-radius: 3px;
+    transition: width .4s ease;
+  }
+  .progress-label { font-size: .78rem; color: var(--text-dim); text-align: right; }
+
+  .progress-message {
+    font-size: .82rem;
+    color: var(--text-muted);
+    min-height: 1.4em;
+    text-align: center;
+    margin-top: .5rem;
+  }
+
+  /* ── Toast ── */
+  #toast-container {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+    pointer-events: none;
+  }
+  .toast {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: .75rem 1rem;
+    font-size: .82rem;
+    max-width: 340px;
+    box-shadow: var(--shadow);
+    animation: toast-in .2s ease;
+    pointer-events: auto;
+  }
+  .toast.success { border-left: 3px solid var(--success); }
+  .toast.error   { border-left: 3px solid var(--danger); }
+  @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+  /* ── Misc ── */
+  .spinner-inline {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    vertical-align: middle;
+    margin-right: 5px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2"/>
+      <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      <circle cx="12" cy="16" r="1.5"/>
+    </svg>
+    VaultMgr
+    <span class="logo-sub">Encrypted Vault Manager</span>
+  </div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <div class="toolbar-title">
+      Vaults <span id="vault-count"></span>
+    </div>
+    <button class="btn btn-primary" onclick="openCreateModal()">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+        <line x1="6" y1="1" x2="6" y2="11"/><line x1="1" y1="6" x2="11" y2="6"/>
+      </svg>
+      New Vault
+    </button>
+  </div>
+  <div id="vaults-grid"></div>
+</main>
+
+<!-- ═══════════════════════════════════════════════
+     CREATE VAULT MODAL
+═══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="create-modal" onclick="closeOnBackdrop(event,'create-modal')">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Create New Vault</span>
+      <button class="modal-close" onclick="closeModal('create-modal')">&times;</button>
+    </div>
+
+    <form id="create-form">
+      <div class="form-group">
+        <label class="form-label">Vault Name <span>*</span></label>
+        <input type="text" id="cf-name" placeholder="e.g. private" autocomplete="off" required oninput="updateMountPreview()">
+        <p class="form-hint">Used as the LUKS mapper name — letters, numbers and hyphens only after normalisation.</p>
+      </div>
+
+      <div class="input-row">
+        <div class="form-group" id="cf-path-group">
+          <label class="form-label">Storage Directory <span>*</span></label>
+          <!-- Populated from /api/config; hidden when only one option -->
+          <select id="cf-path"></select>
+          <p class="form-hint">Directory where <code style="font-family:var(--mono);font-size:.7rem">&lt;name&gt;.img</code> will be created.</p>
+        </div>
+        <div class="form-group" style="max-width:100px">
+          <label class="form-label">Size (GB) <span>*</span></label>
+          <input type="number" id="cf-size" placeholder="500" min="1" required>
+        </div>
+      </div>
+
+      <div class="form-group" id="cf-mount-group">
+        <label class="form-label">Mount Base Directory <span>*</span></label>
+        <!-- Populated from /api/config; hidden when only one option -->
+        <select id="cf-mount" onchange="updateMountPreview()"></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Mount Point</label>
+        <div id="cf-mount-preview" style="font-family:var(--mono);font-size:.8rem;color:var(--text-dim);padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;">—</div>
+        <p class="form-hint">Computed as <em>base directory / vault name</em>.</p>
+      </div>
+
+      <div class="input-row">
+        <div class="form-group">
+          <label class="form-label">Password <span>*</span></label>
+          <input type="password" id="cf-pass" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm Password <span>*</span></label>
+          <input type="password" id="cf-pass2" required>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="create-btn" onclick="submitCreate()">Create Vault</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     PROGRESS MODAL
+═══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="progress-modal">
+  <div class="modal progress-modal">
+    <div class="modal-header">
+      <span class="modal-title" id="progress-title">Creating vault…</span>
+    </div>
+
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progress-bar" style="width:0%"></div>
+    </div>
+    <div class="progress-label"><span id="progress-pct">0</span>%</div>
+
+    <div class="steps-list" id="steps-list">
+      <div class="step-item" id="step-creating">
+        <div class="step-icon">—</div>
+        <span>Create container file</span>
+      </div>
+      <div class="step-item" id="step-encrypting">
+        <div class="step-icon">—</div>
+        <span>Encrypt with LUKS (luksFormat)</span>
+      </div>
+      <div class="step-item" id="step-opening">
+        <div class="step-icon">—</div>
+        <span>Open LUKS device (luksOpen)</span>
+      </div>
+      <div class="step-item" id="step-formatting">
+        <div class="step-icon">—</div>
+        <span>Format filesystem (mkfs.ext4)</span>
+      </div>
+      <div class="step-item" id="step-mounting">
+        <div class="step-icon">—</div>
+        <span>Mount filesystem</span>
+      </div>
+    </div>
+
+    <p class="progress-message" id="progress-message">Starting…</p>
+
+    <div class="form-actions" id="progress-actions" style="display:none">
+      <button class="btn btn-success" onclick="closeModal('progress-modal'); loadVaults()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     UNLOCK MODAL
+═══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="unlock-modal" onclick="closeOnBackdrop(event,'unlock-modal')">
+  <div class="modal" style="max-width:360px">
+    <div class="modal-header">
+      <span class="modal-title">Unlock Vault</span>
+      <button class="modal-close" onclick="closeModal('unlock-modal')">&times;</button>
+    </div>
+    <p style="font-size:.82rem;color:var(--text-dim);margin-bottom:1rem">
+      Enter the password for <strong id="unlock-vault-name" style="color:var(--text)"></strong>.
+    </p>
+    <form>
+      <div class="form-group">
+        <label class="form-label">Password <span>*</span></label>
+        <input type="password" id="unlock-pass" required autofocus>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('unlock-modal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="unlock-btn" onclick="submitUnlock()">Unlock</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     DELETE CONFIRM MODAL
+═══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="delete-modal" onclick="closeOnBackdrop(event,'delete-modal')">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <span class="modal-title" style="color:var(--danger)">Delete Vault</span>
+      <button class="modal-close" onclick="closeModal('delete-modal')">&times;</button>
+    </div>
+    <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:.5rem">
+      Permanently delete <strong id="delete-vault-name" style="color:var(--text)"></strong>?
+    </p>
+    <p style="font-size:.78rem;color:var(--danger);margin-bottom:1.5rem">
+      This will delete the image file from disk. This action cannot be undone.
+    </p>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('delete-modal')">Cancel</button>
+      <button class="btn btn-danger" id="delete-confirm-btn" onclick="confirmDelete()">Delete permanently</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let vaults = [];
+let storageDirs = [];
+let mountDirs = [];
+let pendingUnlockId = null;
+let pendingDeleteId = null;
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => { loadConfig(); loadVaults(); });
+
+// ── Config ────────────────────────────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const cfg = await api('GET', '/api/config');
+
+    storageDirs = cfg.storage_dirs ?? [];
+    populateSelect('cf-path', 'cf-path-group', storageDirs);
+
+    mountDirs = cfg.mount_dirs ?? [];
+    populateSelect('cf-mount', 'cf-mount-group', mountDirs);
+  } catch (e) {
+    toast('Failed to load config: ' + e.message, 'error');
+  }
+}
+
+function populateSelect(selectId, groupId, options) {
+  const select = document.getElementById(selectId);
+  const group  = document.getElementById(groupId);
+  select.innerHTML = options.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join('');
+  // Hide the whole field when there is only one choice — no decision to make.
+  group.style.display = options.length <= 1 ? 'none' : '';
+  if (selectId === 'cf-mount') updateMountPreview();
+}
+
+function updateMountPreview() {
+  const name     = document.getElementById('cf-name').value.trim();
+  const baseDir  = mountDirs.length === 1 ? mountDirs[0] : document.getElementById('cf-mount').value;
+  const preview  = document.getElementById('cf-mount-preview');
+  preview.textContent = name && baseDir ? `${baseDir}/${name}` : '—';
+}
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  if (res.status === 204) return null;
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+// ── Vault list ────────────────────────────────────────────────────────────────
+async function loadVaults() {
+  try {
+    vaults = await api('GET', '/api/vaults') ?? [];
+    renderVaults();
+  } catch (e) {
+    toast('Failed to load vaults: ' + e.message, 'error');
+  }
+}
+
+function renderVaults() {
+  const grid = document.getElementById('vaults-grid');
+  const count = vaults ? vaults.length : 0;
+  document.getElementById('vault-count').textContent = count ? `(${count})` : '';
+
+  if (!count) {
+    grid.innerHTML = `
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        <p>No vaults yet</p>
+        <small>Click <strong>New Vault</strong> to create your first encrypted vault.</small>
+      </div>`;
+    return;
+  }
+
+  grid.innerHTML = vaults.map(vaultCard).join('');
+}
+
+function vaultCard(v) {
+  const status = v.mounted ? 'mounted' : v.unlocked ? 'unlocked' : 'locked';
+  const label  = v.mounted ? 'Mounted' : v.unlocked ? 'Unlocked' : 'Locked';
+
+  const lockBtn = v.mounted
+    ? `<button class="btn btn-warning" onclick="lockVault(${v.id})">
+         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+           <rect x="3" y="11" width="18" height="11" rx="2"/>
+           <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+         </svg>Lock
+       </button>`
+    : `<button class="btn btn-primary" onclick="showUnlock(${v.id})">
+         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+           <rect x="3" y="11" width="18" height="11" rx="2"/>
+           <path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+         </svg>Unlock
+       </button>`;
+
+  return `
+    <div class="vault-card ${status}">
+      <div class="vault-header">
+        <span class="vault-name">${esc(v.name)}</span>
+        <span class="badge badge-${status}">${label}</span>
+      </div>
+      <div class="vault-meta">
+        <div class="meta-row"><span class="meta-label">Size</span><span class="meta-value">${v.size_gb} GB</span></div>
+        <div class="meta-row"><span class="meta-label">Image</span><span class="meta-value mono">${esc(v.path)}</span></div>
+        <div class="meta-row"><span class="meta-label">Mount</span><span class="meta-value mono">${esc(v.mount_point)}</span></div>
+        <div class="meta-row"><span class="meta-label">Mapper</span><span class="meta-value mono">/dev/mapper/${esc(v.mapper_name)}</span></div>
+        <div class="meta-row"><span class="meta-label">Created</span><span class="meta-value">${fmtDate(v.created_at)}</span></div>
+      </div>
+      <div class="vault-actions">
+        ${lockBtn}
+        <button class="btn btn-danger" onclick="showDelete(${v.id})" ${v.mounted ? 'disabled title="Lock vault before deleting"' : ''}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
+            <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+          </svg>Delete
+        </button>
+      </div>
+    </div>`;
+}
+
+// ── Create vault ──────────────────────────────────────────────────────────────
+function openCreateModal() {
+  document.getElementById('create-form').reset();
+  openModal('create-modal');
+}
+
+async function submitCreate() {
+  const name   = document.getElementById('cf-name').value.trim();
+  const path   = storageDirs.length === 1 ? storageDirs[0] : document.getElementById('cf-path').value;
+  const size   = parseInt(document.getElementById('cf-size').value, 10);
+  const mountDir = mountDirs.length === 1 ? mountDirs[0] : document.getElementById('cf-mount').value;
+  const pass   = document.getElementById('cf-pass').value;
+  const pass2  = document.getElementById('cf-pass2').value;
+
+  if (pass !== pass2) { toast('Passwords do not match', 'error'); return; }
+  if (pass.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+
+  const btn = document.getElementById('create-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-inline"></span>Starting…';
+
+  try {
+    const { job_id } = await api('POST', '/api/vaults', { name, path, size_gb: size, password: pass, mount_dir: mountDir });
+    closeModal('create-modal');
+    startProgressModal(job_id, name);
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = 'Create Vault';
+  }
+}
+
+// ── Progress modal ────────────────────────────────────────────────────────────
+const STEP_ORDER = ['creating','encrypting','opening','formatting','mounting','done'];
+
+function startProgressModal(jobId, vaultName) {
+  // Reset step indicators
+  STEP_ORDER.forEach(s => {
+    const el = document.getElementById('step-' + s);
+    if (!el) return;
+    el.className = 'step-item';
+    el.querySelector('.step-icon').innerHTML = '—';
+  });
+  document.getElementById('progress-bar').style.width = '0%';
+  document.getElementById('progress-pct').textContent = '0';
+  document.getElementById('progress-message').textContent = 'Starting…';
+  document.getElementById('progress-title').textContent = `Creating "${vaultName}"…`;
+  document.getElementById('progress-actions').style.display = 'none';
+  openModal('progress-modal');
+
+  let lastStep = null;
+
+  const es = new EventSource(`/api/vaults/events/${jobId}`);
+
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+
+    // Update progress bar
+    document.getElementById('progress-bar').style.width = ev.percent + '%';
+    document.getElementById('progress-pct').textContent = ev.percent;
+    document.getElementById('progress-message').textContent = ev.message || '';
+
+    if (ev.error) {
+      es.close();
+      document.getElementById('progress-title').textContent = 'Creation failed';
+      document.getElementById('progress-message').textContent = ev.error;
+      document.getElementById('progress-message').style.color = 'var(--danger)';
+      // Mark last active step as error
+      if (lastStep) markStep(lastStep, 'error');
+      document.getElementById('progress-actions').style.display = 'flex';
+      toast('Vault creation failed: ' + ev.error, 'error');
+      return;
+    }
+
+    // Mark previous step done
+    if (lastStep && lastStep !== ev.step) {
+      markStep(lastStep, 'done');
+    }
+
+    if (ev.step && ev.step !== 'done') {
+      markStep(ev.step, 'active');
+      lastStep = ev.step;
+    }
+
+    if (ev.done) {
+      es.close();
+      if (lastStep) markStep(lastStep, 'done');
+      document.getElementById('progress-bar').style.width = '100%';
+      document.getElementById('progress-pct').textContent = '100';
+      document.getElementById('progress-title').textContent = 'Vault created!';
+      document.getElementById('progress-message').textContent = 'Your encrypted vault is ready and mounted.';
+      document.getElementById('progress-message').style.color = 'var(--success)';
+      document.getElementById('progress-actions').style.display = 'flex';
+      loadVaults();
+    }
+  };
+
+  es.onerror = () => {
+    es.close();
+    document.getElementById('progress-title').textContent = 'Connection lost';
+    document.getElementById('progress-message').textContent = 'Lost connection to server. Check server logs.';
+    document.getElementById('progress-message').style.color = 'var(--danger)';
+    document.getElementById('progress-actions').style.display = 'flex';
+  };
+}
+
+function markStep(step, state) {
+  const el = document.getElementById('step-' + step);
+  if (!el) return;
+  el.className = 'step-item ' + state;
+  const icon = el.querySelector('.step-icon');
+  if (state === 'active') {
+    icon.innerHTML = '<div class="spinner"></div>';
+  } else if (state === 'done') {
+    icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="2 7 5.5 10.5 12 3"/></svg>';
+  } else if (state === 'error') {
+    icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="2" y1="2" x2="12" y2="12"/><line x1="12" y1="2" x2="2" y2="12"/></svg>';
+  }
+}
+
+// ── Unlock vault ──────────────────────────────────────────────────────────────
+function showUnlock(id) {
+  pendingUnlockId = id;
+  const v = vaults.find(x => x.id === id);
+  document.getElementById('unlock-vault-name').textContent = v ? v.name : `#${id}`;
+  document.getElementById('unlock-pass').value = '';
+  document.getElementById('unlock-btn').disabled = false;
+  document.getElementById('unlock-btn').textContent = 'Unlock';
+  openModal('unlock-modal');
+  setTimeout(() => document.getElementById('unlock-pass').focus(), 120);
+}
+
+async function submitUnlock() {
+  const pass = document.getElementById('unlock-pass').value;
+  const btn  = document.getElementById('unlock-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-inline"></span>Unlocking…';
+
+  try {
+    await api('POST', `/api/vaults/${pendingUnlockId}/unlock`, { password: pass });
+    closeModal('unlock-modal');
+    toast('Vault unlocked and mounted.', 'success');
+    loadVaults();
+  } catch (err) {
+    toast('Unlock failed: ' + err.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Unlock';
+  }
+}
+
+// ── Lock vault ────────────────────────────────────────────────────────────────
+async function lockVault(id) {
+  const v = vaults.find(x => x.id === id);
+  try {
+    await api('POST', `/api/vaults/${id}/lock`);
+    toast(`"${v ? v.name : id}" locked successfully.`, 'success');
+    loadVaults();
+  } catch (err) {
+    toast('Lock failed: ' + err.message, 'error');
+  }
+}
+
+// ── Delete vault ──────────────────────────────────────────────────────────────
+function showDelete(id) {
+  pendingDeleteId = id;
+  const v = vaults.find(x => x.id === id);
+  document.getElementById('delete-vault-name').textContent = v ? v.name : `#${id}`;
+  openModal('delete-modal');
+}
+
+async function confirmDelete() {
+  const btn = document.getElementById('delete-confirm-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-inline"></span>Deleting…';
+
+  try {
+    await api('DELETE', `/api/vaults/${pendingDeleteId}`);
+    closeModal('delete-modal');
+    toast('Vault deleted.', 'success');
+    loadVaults();
+  } catch (err) {
+    toast('Delete failed: ' + err.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Delete permanently';
+  }
+}
+
+// ── Modal helpers ─────────────────────────────────────────────────────────────
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function closeOnBackdrop(e, id) { if (e.target.id === id) closeModal(id); }
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 4500);
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+}
+
+function fmtDate(s) {
+  if (!s) return '—';
+  try {
+    return new Date(s + (s.endsWith('Z') ? '' : 'Z'))
+      .toLocaleDateString(undefined, { year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+  } catch { return s; }
+}
+</script>
+</body>
+</html>

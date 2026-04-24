@@ -1,0 +1,27 @@
+services:
+  vaultmgr:
+    image: registry.rimba-net.com/vaultmgr:latest
+    container_name: vaultmgr
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persist the SQLite database
+      - vaultmgr-data:/data
+      # Shared propagation: mounts created inside the container propagate to
+      # the host. Requires the host directories to be shared mounts — on
+      # Debian 12 with systemd this is the default. If not, run once on the
+      # host: mount --make-shared /tank && mount --make-shared /mnt
+      - type: bind
+        source: /mnt
+        target: /mnt
+        bind:
+          propagation: shared
+    environment:
+      DB_PATH: /data/vaultmgr.db
+      VAULT_STORAGE_DIRS: /vaults
+      VAULT_MOUNT_DIRS: /mnt
+    privileged: true
+    restart: unless-stopped
+
+volumes:
+  vaultmgr-data:
