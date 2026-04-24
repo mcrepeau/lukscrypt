@@ -1,3 +1,6 @@
+// Package api wires up the HTTP router and handlers for the vaultmgr web UI
+// and JSON API. All state-mutating vault operations are serialized through a
+// single mutex to prevent device-mapper races under concurrent requests.
 package api
 
 import (
@@ -166,6 +169,12 @@ func (h *handler) vaultEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Client disconnected. Remove the job entry so the map doesn't
+			// grow unbounded; the creation goroutine uses non-blocking sends
+			// so it will finish regardless of whether anyone is reading.
+			h.jobsMu.Lock()
+			delete(h.jobs, jobID)
+			h.jobsMu.Unlock()
 			return
 		case event, open := <-ch:
 			if !open {
@@ -244,6 +253,8 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "vault not found", http.StatusNotFound)
 		return
 	}
+	h.opMu.Lock()
+	defer h.opMu.Unlock()
 	if err := vault.Delete(v); err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return

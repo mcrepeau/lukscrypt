@@ -1,3 +1,6 @@
+// Package vault implements LUKS encrypted vault operations: creating, opening,
+// closing and deleting image-backed encrypted filesystems via cryptsetup, dd,
+// and the standard Linux mount utilities.
 package vault
 
 import (
@@ -90,7 +93,12 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 
 	// Step 4: format filesystem
 	send("formatting", "Formatting ext4 filesystem...", 85)
-	cmd = exec.Command("mkfs.ext4", "-L", name, "/dev/mapper/"+mapperName)
+	// ext4 volume labels are capped at 16 characters.
+	label := name
+	if len(label) > 16 {
+		label = label[:16]
+	}
+	cmd = exec.Command("mkfs.ext4", "-L", label, "/dev/mapper/"+mapperName)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		exec.Command("cryptsetup", "luksClose", mapperName).Run()
 		fail(fmt.Sprintf("mkfs.ext4 (%s)", strings.TrimSpace(string(out))), err)
@@ -177,6 +185,9 @@ func createFile(imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
 			}
 			// File creation is mapped to 0–60% of the overall progress.
 			pct := int(float64(info.Size()) / float64(totalBytes) * 60)
+			if pct > 60 {
+				pct = 60
+			}
 			select {
 			case ch <- ProgressEvent{
 				Step:    "creating",

@@ -1,3 +1,6 @@
+// Package db provides a thin SQLite-backed store for vault metadata.
+// It intentionally stores only static configuration (path, size, mount point,
+// mapper name); runtime state (mounted/unlocked) is derived live from the OS.
 package db
 
 import (
