@@ -1,4 +1,4 @@
-module vaultmgr
+module lukscrypt
 
 go 1.22
 

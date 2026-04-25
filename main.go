@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"vaultmgr/internal/api"
-	"vaultmgr/internal/db"
+	"lukscrypt/internal/api"
+	"lukscrypt/internal/db"
 )
 
 //go:embed web/index.html

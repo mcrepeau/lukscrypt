@@ -1,12 +1,12 @@
 services:
-  vaultmgr:
-    image: registry.rimba-net.com/vaultmgr:latest
-    container_name: vaultmgr
+  lukscrypt:
+    image: registry.rimba-net.com/lukscrypt:latest
+    container_name: lukscrypt
     ports:
       - "8080:8080"
     volumes:
       # Persist the SQLite database
-      - vaultmgr-data:/data
+      - lukscrypt-data:/data
       # Shared propagation: mounts created inside the container propagate to
       # the host. Requires the host directories to be shared mounts — on
       # Debian 12 with systemd this is the default. If not, run once on the
@@ -17,11 +17,11 @@ services:
         bind:
           propagation: shared
     environment:
-      DB_PATH: /data/vaultmgr.db
+      DB_PATH: /data/lukscrypt.db
       VAULT_STORAGE_DIRS: /vaults
       VAULT_MOUNT_DIRS: /mnt
     privileged: true
     restart: unless-stopped
 
 volumes:
-  vaultmgr-data:
+  lukscrypt-data:

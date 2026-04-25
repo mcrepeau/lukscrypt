@@ -7,7 +7,7 @@ RUN go mod download
 
 COPY . .
 # CGO_ENABLED=0 gives a fully static binary (modernc.org/sqlite is pure Go).
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /vaultmgr .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /lukscrypt .
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -24,11 +24,11 @@ RUN apt-get update && \
         dmsetup \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /vaultmgr /usr/local/bin/vaultmgr
+COPY --from=builder /lukscrypt /usr/local/bin/lukscrypt
 
 RUN mkdir -p /data
 VOLUME ["/data"]
 
 EXPOSE 8080
 
-CMD ["vaultmgr"]
+CMD ["lukscrypt"]

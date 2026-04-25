@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"vaultmgr/internal/db"
+	"lukscrypt/internal/db"
 )
 
 // ProgressEvent is sent over SSE during vault creation.

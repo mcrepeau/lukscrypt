@@ -1,4 +1,4 @@
-# vaultmgr
+# LUKSCrypt
 
 A self-hosted web UI for managing LUKS-encrypted vault files on Linux.
 Designed to run as a privileged Docker container on a NAS (tested on Debian 12 / OpenMediaVault).
@@ -16,7 +16,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 ## Architecture
 
 ```
-vaultmgr/
+lukscrypt/
 ├── main.go                  # Entry point — reads env, opens DB, starts HTTP server
 ├── internal/
 │   ├── api/api.go           # HTTP router and handlers (Go 1.22 stdlib mux)
@@ -47,13 +47,13 @@ container ships as a single static executable with no external file dependencies
 # For ARM64 NAS (e.g. Raspberry Pi, most Synology/QNAP models)
 docker buildx build \
   --platform linux/arm64 \
-  -t registry.example.com/vaultmgr:latest \
+  -t registry.example.com/lukscrypt:latest \
   --push .
 
 # For AMD64
 docker buildx build \
   --platform linux/amd64 \
-  -t registry.example.com/vaultmgr:latest \
+  -t registry.example.com/lukscrypt:latest \
   --push .
 ```
 
@@ -61,27 +61,27 @@ docker buildx build \
 
 ```yaml
 services:
-  vaultmgr:
-    image: registry.example.com/vaultmgr:latest
-    container_name: vaultmgr
+  lukscrypt:
+    image: registry.example.com/lukscrypt:latest
+    container_name: lukscrypt
     ports:
       - "8080:8080"
     volumes:
-      - vaultmgr-data:/data
+      - lukscrypt-data:/data
       - type: bind
         source: /mnt         # adjust to match your NAS layout
         target: /mnt
         bind:
           propagation: shared
     environment:
-      DB_PATH: /data/vaultmgr.db
+      DB_PATH: /data/lukscrypt.db
       VAULT_STORAGE_DIRS: /vaults
       VAULT_MOUNT_DIRS: /mnt
     privileged: true
     restart: unless-stopped
 
 volumes:
-  vaultmgr-data:
+  lukscrypt-data:
 ```
 
 ### 3. Deploy on the NAS
@@ -110,7 +110,7 @@ All configuration is via environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DB_PATH` | `/data/vaultmgr.db` | Path to the SQLite database file |
+| `DB_PATH` | `/data/lukscrypt.db` | Path to the SQLite database file |
 | `VAULT_STORAGE_DIRS` | `/vaults` | Comma-separated list of directories where vault `.img` files may be created |
 | `VAULT_MOUNT_DIRS` | `/mnt` | Comma-separated list of base directories under which vaults are mounted |
 
@@ -219,7 +219,7 @@ Steps in order: `creating` → `encrypting` → `opening` → `formatting` → `
 go run . 
 
 # Build binary
-CGO_ENABLED=0 go build -ldflags="-s -w" -o vaultmgr .
+CGO_ENABLED=0 go build -ldflags="-s -w" -o lukscrypt .
 
 # Vet
 go vet ./...

@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"vaultmgr/internal/db"
-	"vaultmgr/internal/vault"
+	"lukscrypt/internal/db"
+	"lukscrypt/internal/vault"
 )
 
 type handler struct {
