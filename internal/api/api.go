@@ -8,14 +8,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
 	"lukscrypt/internal/db"
 	"lukscrypt/internal/vault"
 )
+
+// unlockEntry pairs a rate limiter with a last-seen timestamp for cleanup.
+type unlockEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
 
 type handler struct {
 	db          *db.DB
@@ -27,7 +36,9 @@ type handler struct {
 	// opMu serializes vault state-changing operations (lock/unlock/create) to
 	// prevent races on the device-mapper subsystem when multiple requests arrive
 	// in rapid succession.
-	opMu sync.Mutex
+	opMu           sync.Mutex
+	unlockLimiters map[string]*unlockEntry
+	unlockMu       sync.Mutex
 }
 
 // vaultResponse is the JSON shape sent to the frontend.
@@ -45,12 +56,14 @@ type vaultResponse struct {
 
 func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string) http.Handler {
 	h := &handler{
-		db:          database,
-		webFS:       webFiles,
-		storageDirs: storageDirs,
-		mountDirs:   mountDirs,
-		jobs:        make(map[string]<-chan vault.ProgressEvent),
+		db:             database,
+		webFS:          webFiles,
+		storageDirs:    storageDirs,
+		mountDirs:      mountDirs,
+		jobs:           make(map[string]<-chan vault.ProgressEvent),
+		unlockLimiters: make(map[string]*unlockEntry),
 	}
+	go h.cleanupLimiters()
 
 	mux := http.NewServeMux()
 	// Static
@@ -196,6 +209,10 @@ func (h *handler) vaultEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
+	if !h.unlockAllowed(r) {
+		jsonErr(w, "too many unlock attempts — wait before trying again", http.StatusTooManyRequests)
+		return
+	}
 	id, err := parseID(r)
 	if err != nil {
 		jsonErr(w, "invalid vault id", http.StatusBadRequest)
@@ -295,6 +312,57 @@ func jsonErr(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// unlockAllowed returns true if the request's IP is within its rate limit.
+// Each IP gets a burst of 5 attempts; after exhausting the burst, one attempt
+// is allowed every 30 seconds. This limits brute-force password guessing while
+// still allowing a user to quickly retry after a typo.
+func (h *handler) unlockAllowed(r *http.Request) bool {
+	ip := clientIP(r)
+	h.unlockMu.Lock()
+	e, ok := h.unlockLimiters[ip]
+	if !ok {
+		e = &unlockEntry{limiter: rate.NewLimiter(rate.Every(30*time.Second), 5)}
+		h.unlockLimiters[ip] = e
+	}
+	e.lastSeen = time.Now()
+	allowed := e.limiter.Allow()
+	h.unlockMu.Unlock()
+	return allowed
+}
+
+// cleanupLimiters removes rate-limiter entries that have been idle for more
+// than 10 minutes to prevent unbounded memory growth.
+func (h *handler) cleanupLimiters() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		h.unlockMu.Lock()
+		for ip, e := range h.unlockLimiters {
+			if time.Since(e.lastSeen) > 10*time.Minute {
+				delete(h.unlockLimiters, ip)
+			}
+		}
+		h.unlockMu.Unlock()
+	}
+}
+
+// clientIP extracts the real client IP, respecting X-Forwarded-For when
+// running behind a reverse proxy. Note: X-Forwarded-For can be spoofed if the
+// app is directly internet-facing without a trusted proxy stripping the header.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.Index(xff, ","); i != -1 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
 }
 
 func (h *handler) allowedStorageDir(path string) bool {

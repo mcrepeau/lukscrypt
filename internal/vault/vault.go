@@ -50,6 +50,12 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 		return
 	}
 
+	// Fail fast if there is not enough free space on the target filesystem.
+	if err := checkDiskSpace(path, sizeGB); err != nil {
+		fail("disk space check", err)
+		return
+	}
+
 	// Fail fast if the image file already exists.
 	if _, err := os.Stat(imgPath); err == nil {
 		fail("create container file", fmt.Errorf("file %s already exists", imgPath))
