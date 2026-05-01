@@ -85,7 +85,7 @@ func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string,
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 
-	return h.basicAuth(mux)
+	return h.securityHeaders(h.basicAuth(mux))
 }
 
 func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -372,6 +372,30 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+// securityHeaders sets defensive HTTP headers on every response.
+// CSP permits only same-origin resources; 'unsafe-inline' is required because
+// the single-file UI embeds all styles and scripts inline.
+func (h *handler) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr := w.Header()
+		hdr.Set("X-Content-Type-Options", "nosniff")
+		hdr.Set("X-Frame-Options", "DENY")
+		hdr.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		hdr.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		hdr.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' 'unsafe-inline'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"connect-src 'self'; "+
+				"img-src 'self' data:; "+
+				"frame-ancestors 'none'; "+
+				"base-uri 'self'; "+
+				"form-action 'self'",
+		)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *handler) basicAuth(next http.Handler) http.Handler {
