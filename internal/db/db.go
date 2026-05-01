@@ -37,6 +37,16 @@ func Open(path string) (*DB, error) {
 }
 
 func migrate(conn *sql.DB) error {
+	// WAL mode allows concurrent reads during writes and is safe for single-process use.
+	// synchronous=NORMAL gives a good durability/performance balance under WAL.
+	for _, pragma := range []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+	} {
+		if _, err := conn.Exec(pragma); err != nil {
+			return fmt.Errorf("pragma %q: %w", pragma, err)
+		}
+	}
 	_, err := conn.Exec(`CREATE TABLE IF NOT EXISTS vaults (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		name        TEXT UNIQUE NOT NULL,

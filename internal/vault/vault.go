@@ -69,9 +69,9 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 		return
 	}
 
-	// Step 1: create container file with dd, reporting real progress
-	send("creating", fmt.Sprintf("Creating %d GB container file...", sizeGB), 0)
-	if err := createFile(imgPath, sizeGB, ch); err != nil {
+	// Step 1: allocate container file (fallocate if available, dd otherwise)
+	send("creating", fmt.Sprintf("Allocating %d GB container file...", sizeGB), 0)
+	if err := allocateFile(imgPath, sizeGB, ch); err != nil {
 		fail("create container file", err)
 		os.Remove(imgPath)
 		return
@@ -159,6 +159,25 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 	}:
 	default:
 	}
+}
+
+// allocateFile creates the backing image file. It first attempts fallocate,
+// which is near-instantaneous on most Linux filesystems. If fallocate is
+// unavailable or the filesystem doesn't support it (NFS, some older FS types),
+// it falls back to dd which zeroes every block and reports real progress.
+func allocateFile(imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
+	size := int64(sizeGB) * 1024 * 1024 * 1024
+	cmd := exec.Command("fallocate", "-l", fmt.Sprintf("%d", size), imgPath)
+	if err := cmd.Run(); err == nil {
+		select {
+		case ch <- ProgressEvent{Step: "creating", Message: "Container file allocated.", Percent: 60}:
+		default:
+		}
+		return nil
+	}
+	// fallocate failed — clean up any partial file it may have left, then use dd.
+	os.Remove(imgPath)
+	return createFile(imgPath, sizeGB, ch)
 }
 
 // createFile runs dd and monitors file growth to send progress updates to ch.
