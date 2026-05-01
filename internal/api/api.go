@@ -129,6 +129,10 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "all fields are required and size_gb must be positive", http.StatusBadRequest)
 		return
 	}
+	if !isValidVaultName(req.Name) {
+		jsonErr(w, "vault name may only contain lowercase letters, numbers, and hyphens (max 64 chars)", http.StatusBadRequest)
+		return
+	}
 	if !h.allowedStorageDir(req.Path) {
 		jsonErr(w, "storage directory not allowed", http.StatusBadRequest)
 		return
@@ -363,6 +367,18 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+func isValidVaultName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *handler) allowedStorageDir(path string) bool {
