@@ -20,6 +20,8 @@ services:
       DB_PATH: /data/lukscrypt.db
       VAULT_STORAGE_DIRS: /vaults
       VAULT_MOUNT_DIRS: /mnt
+      # AUTH_USER: admin          # default: admin
+      # AUTH_PASSWORD: changeme   # default: random, printed once in container logs
     privileged: true
     restart: unless-stopped
 

@@ -4,6 +4,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,8 @@ type handler struct {
 	webFS       embed.FS
 	storageDirs []string
 	mountDirs   []string
+	authUser    string
+	authPass    string
 	jobs        map[string]<-chan vault.ProgressEvent
 	jobsMu      sync.Mutex
 	// opMu serializes vault state-changing operations (lock/unlock/create) to
@@ -54,12 +57,14 @@ type vaultResponse struct {
 	Mounted    bool   `json:"mounted"`
 }
 
-func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string) http.Handler {
+func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string) http.Handler {
 	h := &handler{
 		db:             database,
 		webFS:          webFiles,
 		storageDirs:    storageDirs,
 		mountDirs:      mountDirs,
+		authUser:       authUser,
+		authPass:       authPass,
 		jobs:           make(map[string]<-chan vault.ProgressEvent),
 		unlockLimiters: make(map[string]*unlockEntry),
 	}
@@ -80,7 +85,7 @@ func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string)
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 
-	return mux
+	return h.basicAuth(mux)
 }
 
 func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +372,20 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+func (h *handler) basicAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(h.authUser))
+		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(h.authPass))
+		if !ok || userMatch != 1 || passMatch != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="vaultmgr"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func isValidVaultName(s string) bool {

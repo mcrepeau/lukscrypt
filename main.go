@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +25,20 @@ func main() {
 	storageDirs := parseList(os.Getenv("VAULT_STORAGE_DIRS"), "/vaults")
 	mountDirs   := parseList(os.Getenv("VAULT_MOUNT_DIRS"), "/mnt")
 
+	authUser := os.Getenv("AUTH_USER")
+	if authUser == "" {
+		authUser = "admin"
+	}
+	authPass := os.Getenv("AUTH_PASSWORD")
+	if authPass == "" {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			log.Fatalf("failed to generate auth password: %v", err)
+		}
+		authPass = hex.EncodeToString(b)
+		log.Printf("AUTH_PASSWORD not set — generated password for user %q: %s", authUser, authPass)
+	}
+
 	database, err := db.Open(dbPath)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
@@ -33,7 +49,7 @@ func main() {
 	log.Printf("mount dirs: %v", mountDirs)
 	addr := ":8080"
 	log.Printf("vaultmgr listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, api.NewMux(database, webFiles, storageDirs, mountDirs)))
+	log.Fatal(http.ListenAndServe(addr, api.NewMux(database, webFiles, storageDirs, mountDirs, authUser, authPass)))
 }
 
 // parseList splits a comma-separated env var and falls back to defaultVal if empty.
