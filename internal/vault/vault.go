@@ -273,13 +273,22 @@ func IsUnlocked(v *db.Vault) bool {
 	return IsMounted(v)
 }
 
-// IsMounted reports whether the vault's mapper device is currently mounted.
+// IsMounted reports whether the vault's filesystem is currently mounted.
+// It matches against the mount point path (column 2 of /proc/mounts) rather
+// than the device name because:
+//   - after a container restart, propagated host mounts may appear as /dev/dm-N
+//     rather than /dev/mapper/<name>, making a device-name search unreliable;
+//   - mount-point matching with space delimiters avoids false substring matches
+//     when one vault name is a prefix of another (e.g. "data" vs "data-2").
 func IsMounted(v *db.Vault) bool {
 	data, err := os.ReadFile("/proc/mounts")
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(data), "/dev/mapper/"+v.MapperName)
+	// Each /proc/mounts line is: <device> <mountpoint> <fstype> ...
+	// The mount point is always surrounded by spaces, so " /mnt/foo " won't
+	// accidentally match " /mnt/foobar ".
+	return strings.Contains(string(data), " "+v.MountPoint+" ")
 }
 
 // sanitizeName converts a vault name to a safe LUKS mapper identifier.
