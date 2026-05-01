@@ -27,6 +27,12 @@ type unlockEntry struct {
 	lastSeen time.Time
 }
 
+// jobEntry tracks an in-progress vault creation for the SSE progress stream.
+type jobEntry struct {
+	ch      <-chan vault.ProgressEvent
+	created time.Time
+}
+
 type handler struct {
 	db          *db.DB
 	webFS       embed.FS
@@ -34,12 +40,13 @@ type handler struct {
 	mountDirs   []string
 	authUser    string
 	authPass    string
-	jobs        map[string]<-chan vault.ProgressEvent
+	jobs        map[string]*jobEntry
 	jobsMu      sync.Mutex
 	// opMu serializes vault state-changing operations (lock/unlock/create) to
 	// prevent races on the device-mapper subsystem when multiple requests arrive
 	// in rapid succession.
 	opMu           sync.Mutex
+	pendingNames   map[string]struct{} // names of vaults currently being created
 	unlockLimiters map[string]*unlockEntry
 	unlockMu       sync.Mutex
 }
@@ -65,10 +72,12 @@ func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string,
 		mountDirs:      mountDirs,
 		authUser:       authUser,
 		authPass:       authPass,
-		jobs:           make(map[string]<-chan vault.ProgressEvent),
+		jobs:           make(map[string]*jobEntry),
+		pendingNames:   make(map[string]struct{}),
 		unlockLimiters: make(map[string]*unlockEntry),
 	}
 	go h.cleanupLimiters()
+	go h.cleanupJobs()
 
 	mux := http.NewServeMux()
 	// Static
@@ -150,14 +159,32 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 	// Full mount point is always <mount_dir>/<vault_name>.
 	mountPoint := req.MountDir + "/" + req.Name
 
+	// Reserve the name under opMu so a second concurrent create request for
+	// the same name can't race past the "file already exists" check in vault.Create.
+	h.opMu.Lock()
+	if _, inFlight := h.pendingNames[req.Name]; inFlight {
+		h.opMu.Unlock()
+		jsonErr(w, "vault creation already in progress for this name", http.StatusConflict)
+		return
+	}
+	h.pendingNames[req.Name] = struct{}{}
+	h.opMu.Unlock()
+
 	jobID := fmt.Sprintf("%d", time.Now().UnixNano())
 	ch := make(chan vault.ProgressEvent, 64)
 
 	h.jobsMu.Lock()
-	h.jobs[jobID] = ch
+	h.jobs[jobID] = &jobEntry{ch: ch, created: time.Now()}
 	h.jobsMu.Unlock()
 
-	go vault.Create(h.db, req.Name, req.Path, req.SizeGB, req.Password, mountPoint, ch)
+	go func() {
+		defer func() {
+			h.opMu.Lock()
+			delete(h.pendingNames, req.Name)
+			h.opMu.Unlock()
+		}()
+		vault.Create(h.db, req.Name, req.Path, req.SizeGB, req.Password, mountPoint, ch)
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -168,13 +195,14 @@ func (h *handler) vaultEvents(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("jobID")
 
 	h.jobsMu.Lock()
-	ch, ok := h.jobs[jobID]
+	entry, ok := h.jobs[jobID]
 	h.jobsMu.Unlock()
 
 	if !ok {
 		jsonErr(w, "job not found", http.StatusNotFound)
 		return
 	}
+	ch := entry.ch
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -281,13 +309,16 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 	}
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
-	if err := vault.Delete(v); err != nil {
-		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
+	// Delete the DB record first. If the filesystem cleanup subsequently fails,
+	// we log the orphaned files for manual removal — but there is no ghost entry
+	// in the DB. Reversing this order would leave a ghost entry pointing at a
+	// nonexistent file, which is harder to recover from.
 	if err := h.db.DeleteVault(id); err != nil {
 		jsonErr(w, "failed to remove vault record", http.StatusInternalServerError)
 		return
+	}
+	if err := vault.Delete(v); err != nil {
+		log.Printf("vault %q: DB record deleted but filesystem cleanup failed: %v", v.Name, err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -339,6 +370,24 @@ func (h *handler) unlockAllowed(r *http.Request) bool {
 	allowed := e.limiter.Allow()
 	h.unlockMu.Unlock()
 	return allowed
+}
+
+// cleanupJobs removes job entries that have been around for more than 30 minutes.
+// This covers the case where a client POSTs to /api/vaults but never connects
+// to the SSE endpoint to consume the channel — the goroutine finishes and closes
+// the channel, but the map entry would otherwise linger forever.
+func (h *handler) cleanupJobs() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		h.jobsMu.Lock()
+		for id, e := range h.jobs {
+			if time.Since(e.created) > 30*time.Minute {
+				delete(h.jobs, id)
+			}
+		}
+		h.jobsMu.Unlock()
+	}
 }
 
 // cleanupLimiters removes rate-limiter entries that have been idle for more
