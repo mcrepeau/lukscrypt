@@ -7,16 +7,19 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 
 - Create encrypted vault image files backed by LUKS (via `cryptsetup`)
 - Unlock (open + mount) and lock (unmount + close) vaults from the browser
-- Real-time creation progress over Server-Sent Events — tracks `dd` file write byte-by-byte
-- Vault metadata persisted in SQLite; runtime state (mounted/unlocked) derived live from the OS
+- Real-time creation progress over Server-Sent Events
+- Fast allocation via `fallocate` (near-instantaneous); falls back to `dd` on unsupported filesystems
+- HTTP Basic Auth — a random password is generated on first start if none is configured
+- Vault metadata persisted in SQLite (WAL mode); runtime state derived live from the OS
 - Configurable storage and mount base directories via environment variables
 - Mounts propagate to the host via shared bind-mount so SMB shares see the vault contents
-- Concurrent lock/unlock operations are serialized to prevent device-mapper races
+- Concurrent lock/unlock/create operations serialized to prevent device-mapper races
+- Rate-limited unlock endpoint to slow brute-force password attempts
 
 ## Architecture
 
 ```
-lukscrypt/
+vaultmgr/
 ├── main.go                  # Entry point — reads env, opens DB, starts HTTP server
 ├── internal/
 │   ├── api/api.go           # HTTP router and handlers (Go 1.22 stdlib mux)
@@ -77,6 +80,8 @@ services:
       DB_PATH: /data/lukscrypt.db
       VAULT_STORAGE_DIRS: /vaults
       VAULT_MOUNT_DIRS: /mnt
+      # AUTH_USER: admin          # default: admin
+      # AUTH_PASSWORD: changeme   # default: random, printed once in container logs
     privileged: true
     restart: unless-stopped
 
@@ -90,7 +95,7 @@ volumes:
 docker compose pull && docker compose up -d
 ```
 
-Access the UI at `http://<nas-ip>:8080`.
+Access the UI at `http://<nas-ip>:8080`. Your browser will prompt for credentials.
 
 ### Mount propagation
 
@@ -113,6 +118,8 @@ All configuration is via environment variables.
 | `DB_PATH` | `/data/lukscrypt.db` | Path to the SQLite database file |
 | `VAULT_STORAGE_DIRS` | `/vaults` | Comma-separated list of directories where vault `.img` files may be created |
 | `VAULT_MOUNT_DIRS` | `/mnt` | Comma-separated list of base directories under which vaults are mounted |
+| `AUTH_USER` | `admin` | HTTP Basic Auth username |
+| `AUTH_PASSWORD` | *(generated)* | HTTP Basic Auth password. If unset, a random 32-character hex password is generated at startup and printed to the container logs. Set this to a stable value in production. |
 
 ### Multiple storage / mount locations
 
@@ -134,9 +141,9 @@ For example, a vault named `private` with mount dir `/mnt` mounts at `/mnt/priva
 
 ### Create
 
-1. Enter a vault name, storage directory, size (GB) and password
+1. Enter a vault name (lowercase letters, numbers, hyphens — max 64 chars), storage directory, size (GB) and password
 2. The server runs (in order):
-   - `dd if=/dev/zero` — allocates the image file (progress streamed live)
+   - `fallocate -l <size>` — allocates the image file instantly (falls back to `dd if=/dev/zero` with live progress if the filesystem does not support fallocate)
    - `cryptsetup luksFormat` — encrypts the container
    - `cryptsetup luksOpen` — opens the LUKS device
    - `mkfs.ext4` — formats the filesystem
@@ -160,9 +167,12 @@ cryptsetup luksClose <mapper-name>
 
 ### Delete
 
-The vault must be locked first. Deletes the `.img` file and the mount point directory.
+The vault must be locked first. The database record is removed first, then the `.img` file
+and mount point directory are deleted from disk.
 
 ## API reference
+
+All endpoints require HTTP Basic Auth.
 
 | Method | Path | Description |
 |---|---|---|
@@ -186,10 +196,12 @@ The vault must be locked first. Deletes the `.img` file and the mount point dire
 }
 ```
 
+Vault names must match `[a-z0-9-]{1,64}`.
+
 ### SSE event format
 
 ```
-data: {"step":"creating","message":"Creating container file... 42%","percent":42}
+data: {"step":"creating","message":"Container file allocated.","percent":60}
 data: {"step":"encrypting","message":"Encrypting vault with LUKS...","percent":62}
 data: {"step":"done","message":"Vault created and mounted successfully!","percent":100,"done":true,"vault_id":1}
 data: {"error":"luksFormat: ..."}
@@ -197,26 +209,32 @@ data: {"error":"luksFormat: ..."}
 
 Steps in order: `creating` → `encrypting` → `opening` → `formatting` → `mounting` → `done`
 
+When `fallocate` is unavailable the `creating` step emits incremental progress events
+(`percent` 0–60) as `dd` writes the file block by block.
+
 ## Security considerations
 
+- **HTTP Basic Auth** is enforced on every endpoint, including the UI. If `AUTH_PASSWORD`
+  is not set, a random 32-character password is generated at startup and printed once to the
+  container logs. Set it explicitly in production so the password survives container restarts.
 - **Passwords are never passed as command-line arguments.** They are written to each
   `cryptsetup` subprocess's stdin and are not visible in `/proc/<pid>/cmdline`.
 - **The container runs as `privileged`** which grants full kernel access. Restrict
-  network exposure — do not expose port 8080 to the internet. Consider placing it
-  behind a reverse proxy with authentication (e.g. Authelia, Nginx basic auth).
-- **No authentication is built in.** This is intentional for simplicity; it is assumed
-  the UI is only reachable on a trusted LAN or through a protected reverse proxy.
-- **Vault names are sanitized** before use as LUKS mapper device names (lowercased,
-  non-alphanumeric characters replaced with `_`).
-- **Storage and mount directories are allowlisted** server-side. The client cannot
-  specify arbitrary paths — any path not in `VAULT_STORAGE_DIRS` / `VAULT_MOUNT_DIRS`
-  is rejected with `400 Bad Request`.
+  network exposure — do not expose port 8080 to the internet. Consider placing it behind
+  a TLS-terminating reverse proxy (e.g. Caddy, Nginx).
+- **Vault names are strictly validated** server-side: only lowercase letters, numbers and
+  hyphens are accepted. This prevents path traversal via crafted vault names.
+- **Storage and mount directories are allowlisted** server-side. The client cannot specify
+  arbitrary paths — any path not in `VAULT_STORAGE_DIRS` / `VAULT_MOUNT_DIRS` is rejected
+  with `400 Bad Request`.
+- **Unlock attempts are rate-limited** per client IP: burst of 5 attempts, then one attempt
+  per 30 seconds. This limits brute-force password guessing.
 
 ## Development
 
 ```bash
 # Run locally (Linux only — LUKS operations require root and cryptsetup)
-go run . 
+go run .
 
 # Build binary
 CGO_ENABLED=0 go build -ldflags="-s -w" -o lukscrypt .
