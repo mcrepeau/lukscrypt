@@ -5,8 +5,10 @@ package api
 
 import (
 	"crypto/subtle"
+	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -264,9 +266,8 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "password is required", http.StatusBadRequest)
 		return
 	}
-	v, err := h.db.GetVault(id)
-	if err != nil {
-		jsonErr(w, "vault not found", http.StatusNotFound)
+	v, ok := h.lookupVault(w, id)
+	if !ok {
 		return
 	}
 	h.opMu.Lock()
@@ -284,9 +285,8 @@ func (h *handler) lockVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid vault id", http.StatusBadRequest)
 		return
 	}
-	v, err := h.db.GetVault(id)
-	if err != nil {
-		jsonErr(w, "vault not found", http.StatusNotFound)
+	v, ok := h.lookupVault(w, id)
+	if !ok {
 		return
 	}
 	h.opMu.Lock()
@@ -304,9 +304,8 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid vault id", http.StatusBadRequest)
 		return
 	}
-	v, err := h.db.GetVault(id)
-	if err != nil {
-		jsonErr(w, "vault not found", http.StatusNotFound)
+	v, ok := h.lookupVault(w, id)
+	if !ok {
 		return
 	}
 	h.opMu.Lock()
@@ -343,6 +342,21 @@ func toResponse(v db.Vault) vaultResponse {
 		resp.DiskUsedBytes, resp.DiskTotalBytes = vault.DiskUsage(v.MountPoint)
 	}
 	return resp
+}
+
+// lookupVault fetches a vault by ID and writes the appropriate error response
+// if it cannot be found. Returns (vault, true) on success, (nil, false) on failure.
+func (h *handler) lookupVault(w http.ResponseWriter, id int64) (*db.Vault, bool) {
+	v, err := h.db.GetVault(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonErr(w, "vault not found", http.StatusNotFound)
+		} else {
+			jsonErr(w, "database error", http.StatusInternalServerError)
+		}
+		return nil, false
+	}
+	return v, true
 }
 
 func parseID(r *http.Request) (int64, error) {

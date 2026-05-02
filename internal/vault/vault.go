@@ -43,7 +43,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 	}
 
 	imgPath := filepath.Join(path, name+".img")
-	mapperName := sanitizeName(name)
+	mapperName := name
 
 	if err := os.MkdirAll(path, 0750); err != nil {
 		fail("create storage directory", err)
@@ -310,15 +310,3 @@ func IsMounted(v *db.Vault) bool {
 	return strings.Contains(string(data), " "+v.MountPoint+" ")
 }
 
-// sanitizeName converts a vault name to a safe LUKS mapper identifier.
-func sanitizeName(name string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(name) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('_')
-		}
-	}
-	return b.String()
-}
