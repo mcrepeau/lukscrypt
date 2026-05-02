@@ -53,15 +53,17 @@ type handler struct {
 
 // vaultResponse is the JSON shape sent to the frontend.
 type vaultResponse struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	SizeGB     int    `json:"size_gb"`
-	MountPoint string `json:"mount_point"`
-	MapperName string `json:"mapper_name"`
-	CreatedAt  string `json:"created_at"`
-	Unlocked   bool   `json:"unlocked"`
-	Mounted    bool   `json:"mounted"`
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	SizeGB         int    `json:"size_gb"`
+	MountPoint     string `json:"mount_point"`
+	MapperName     string `json:"mapper_name"`
+	CreatedAt      string `json:"created_at"`
+	Unlocked       bool   `json:"unlocked"`
+	Mounted        bool   `json:"mounted"`
+	DiskUsedBytes  int64  `json:"disk_used_bytes,omitempty"`
+	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 }
 
 func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string) http.Handler {
@@ -326,7 +328,7 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 // helpers
 
 func toResponse(v db.Vault) vaultResponse {
-	return vaultResponse{
+	resp := vaultResponse{
 		ID:         v.ID,
 		Name:       v.Name,
 		Path:       v.Path,
@@ -337,6 +339,10 @@ func toResponse(v db.Vault) vaultResponse {
 		Unlocked:   vault.IsUnlocked(&v),
 		Mounted:    vault.IsMounted(&v),
 	}
+	if resp.Mounted {
+		resp.DiskUsedBytes, resp.DiskTotalBytes = vault.DiskUsage(v.MountPoint)
+	}
+	return resp
 }
 
 func parseID(r *http.Request) (int64, error) {

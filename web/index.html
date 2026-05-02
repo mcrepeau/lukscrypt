@@ -385,6 +385,30 @@
   .toast.error   { border-left: 3px solid var(--danger); }
   @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
 
+  /* ── Disk usage ── */
+  .usage-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: .3rem;
+    padding-top: .6rem;
+    border-top: 1px solid var(--border);
+  }
+  .usage-bar-bg {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .usage-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width .4s ease;
+  }
+  .usage-label {
+    font-size: .7rem;
+    color: var(--text-dim);
+  }
+
   /* ── Misc ── */
   .spinner-inline {
     display: inline-block;
@@ -689,6 +713,19 @@ function vaultCard(v) {
          </svg>Unlock
        </button>`;
 
+  let usageHtml = '';
+  if (v.mounted && v.disk_total_bytes > 0) {
+    const pct   = Math.round(v.disk_used_bytes / v.disk_total_bytes * 100);
+    const color = pct > 90 ? 'var(--danger)' : pct > 75 ? 'var(--warning)' : 'var(--primary)';
+    usageHtml = `
+      <div class="usage-wrap">
+        <div class="usage-bar-bg">
+          <div class="usage-bar-fill" style="width:${pct}%;background:${color}"></div>
+        </div>
+        <span class="usage-label">${fmtBytes(v.disk_used_bytes)} used of ${fmtBytes(v.disk_total_bytes)} &middot; ${pct}%</span>
+      </div>`;
+  }
+
   return `
     <div class="vault-card ${status}">
       <div class="vault-header">
@@ -702,6 +739,7 @@ function vaultCard(v) {
         <div class="meta-row"><span class="meta-label">Mapper</span><span class="meta-value mono">/dev/mapper/${esc(v.mapper_name)}</span></div>
         <div class="meta-row"><span class="meta-label">Created</span><span class="meta-value">${fmtDate(v.created_at)}</span></div>
       </div>
+      ${usageHtml}
       <div class="vault-actions">
         ${lockBtn}
         <button class="btn btn-danger" onclick="showDelete(${v.id})" ${v.mounted ? 'disabled title="Lock vault before deleting"' : ''}>
@@ -927,6 +965,14 @@ function esc(s) {
   return String(s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+}
+
+function fmtBytes(b) {
+  const GiB = 1024 * 1024 * 1024;
+  const MiB = 1024 * 1024;
+  if (b >= GiB) return (b / GiB).toFixed(1) + ' GB';
+  if (b >= MiB) return (b / MiB).toFixed(1) + ' MB';
+  return (b / 1024).toFixed(0) + ' KB';
 }
 
 function fmtDate(s) {
