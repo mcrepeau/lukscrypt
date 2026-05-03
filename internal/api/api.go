@@ -97,6 +97,7 @@ func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string,
 	// Actions
 	mux.HandleFunc("POST /api/vaults/{id}/unlock", h.unlockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/lock", h.lockVault)
+	mux.HandleFunc("POST /api/vaults/{id}/mount", h.mountVault)
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 
@@ -299,6 +300,25 @@ func (h *handler) lockVault(w http.ResponseWriter, r *http.Request) {
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
 	if err := vault.Lock(v); err != nil {
+		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	jsonOK(w, toResponse(*v, vault.ReadMounts()))
+}
+
+func (h *handler) mountVault(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		jsonErr(w, "invalid vault id", http.StatusBadRequest)
+		return
+	}
+	v, ok := h.lookupVault(w, id)
+	if !ok {
+		return
+	}
+	h.opMu.Lock()
+	defer h.opMu.Unlock()
+	if err := vault.Mount(v); err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}

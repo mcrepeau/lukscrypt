@@ -154,6 +154,7 @@
   }
   .badge-mounted  { background: rgba(74,222,128,.15); color: var(--success); }
   .badge-unlocked { background: rgba(251,146,60,.15);  color: var(--warning); }
+  .badge-open     { background: rgba(251,146,60,.15);  color: var(--warning); }
   .badge-locked   { background: rgba(100,116,139,.15); color: var(--text-dim); }
 
   .vault-meta {
@@ -696,22 +697,40 @@ function renderVaults() {
 }
 
 function vaultCard(v) {
-  const status = v.mounted ? 'mounted' : v.unlocked ? 'unlocked' : 'locked';
-  const label  = v.mounted ? 'Mounted' : v.unlocked ? 'Unlocked' : 'Locked';
+  const open   = v.unlocked && !v.mounted;
+  const status = v.mounted ? 'mounted' : open ? 'open' : 'locked';
+  const label  = v.mounted ? 'Mounted' : open ? 'Open' : 'Locked';
 
-  const lockBtn = v.mounted
-    ? `<button class="btn btn-warning" onclick="lockVault(${v.id})">
+  let lockBtn;
+  if (v.mounted) {
+    lockBtn = `<button class="btn btn-warning" onclick="lockVault(${v.id})">
          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
            <rect x="3" y="11" width="18" height="11" rx="2"/>
            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
          </svg>Lock
-       </button>`
-    : `<button class="btn btn-primary" onclick="showUnlock(${v.id})">
+       </button>`;
+  } else if (open) {
+    lockBtn = `
+      <button class="btn btn-primary" onclick="mountVault(${v.id})">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>Mount
+      </button>
+      <button class="btn btn-warning" onclick="lockVault(${v.id})">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <rect x="3" y="11" width="18" height="11" rx="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>Close
+      </button>`;
+  } else {
+    lockBtn = `<button class="btn btn-primary" onclick="showUnlock(${v.id})">
          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
            <rect x="3" y="11" width="18" height="11" rx="2"/>
            <path d="M7 11V7a5 5 0 0 1 9.9-1"/>
          </svg>Unlock
        </button>`;
+  }
 
   let usageHtml = '';
   if (v.mounted && v.disk_total_bytes > 0) {
@@ -917,6 +936,20 @@ async function lockVault(id) {
     toast(`"${v ? v.name : id}" locked successfully.`, 'success');
   } catch (err) {
     toast('Lock failed: ' + err.message, 'error');
+  }
+}
+
+// ── Mount vault (re-mount after unlocked-but-not-mounted state) ───────────────
+async function mountVault(id) {
+  const v = vaults.find(x => x.id === id);
+  try {
+    const updated = await api('POST', `/api/vaults/${id}/mount`);
+    const idx = vaults.findIndex(x => x.id === id);
+    if (idx !== -1) vaults[idx] = updated;
+    renderVaults();
+    toast(`"${v ? v.name : id}" mounted successfully.`, 'success');
+  } catch (err) {
+    toast('Mount failed: ' + err.message, 'error');
   }
 }
 

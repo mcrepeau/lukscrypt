@@ -251,17 +251,43 @@ func Unlock(v *db.Vault, password string) error {
 	return nil
 }
 
-// Lock unmounts and closes a LUKS device.
+// Lock closes a LUKS device, unmounting it first if currently mounted.
+// It handles the unlocked-but-not-mounted state (e.g. after a failed mount or
+// a manual umount) by skipping the umount step when nothing is mounted.
 func Lock(v *db.Vault) error {
-	if !IsUnlocked(v) {
+	mounts := ReadMounts()
+	unlocked, mounted := StatusIn(v, mounts)
+	if !unlocked {
 		return fmt.Errorf("vault is already locked")
 	}
-
-	if out, err := exec.Command("umount", v.MountPoint).CombinedOutput(); err != nil {
-		return fmt.Errorf("umount: %s", strings.TrimSpace(string(out)))
+	if mounted {
+		if out, err := exec.Command("umount", v.MountPoint).CombinedOutput(); err != nil {
+			return fmt.Errorf("umount: %s", strings.TrimSpace(string(out)))
+		}
 	}
 	if out, err := exec.Command("cryptsetup", "luksClose", v.MapperName).CombinedOutput(); err != nil {
 		return fmt.Errorf("luksClose: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// Mount mounts an already-unlocked vault at its configured mount point.
+// Returns an error if the vault is not unlocked or is already mounted.
+func Mount(v *db.Vault) error {
+	mounts := ReadMounts()
+	unlocked, mounted := StatusIn(v, mounts)
+	if !unlocked {
+		return fmt.Errorf("vault is not unlocked")
+	}
+	if mounted {
+		return fmt.Errorf("vault is already mounted")
+	}
+	if err := os.MkdirAll(v.MountPoint, 0750); err != nil {
+		return fmt.Errorf("create mount point: %w", err)
+	}
+	cmd := exec.Command("mount", "/dev/mapper/"+v.MapperName, v.MountPoint)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("mount: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
 }
