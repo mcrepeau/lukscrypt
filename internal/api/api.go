@@ -42,6 +42,7 @@ type handler struct {
 	mountDirs   []string
 	authUser    string
 	authPass    string
+	maxSizeGB   int
 	jobs        map[string]*jobEntry
 	jobsMu      sync.Mutex
 	// opMu serializes vault state-changing operations (lock/unlock/create) to
@@ -68,7 +69,7 @@ type vaultResponse struct {
 	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 }
 
-func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string) http.Handler {
+func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int) http.Handler {
 	h := &handler{
 		db:             database,
 		webFS:          webFiles,
@@ -76,6 +77,7 @@ func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string,
 		mountDirs:      mountDirs,
 		authUser:       authUser,
 		authPass:       authPass,
+		maxSizeGB:      maxSizeGB,
 		jobs:           make(map[string]*jobEntry),
 		pendingNames:   make(map[string]struct{}),
 		unlockLimiters: make(map[string]*unlockEntry),
@@ -145,6 +147,10 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" || req.Path == "" || req.SizeGB <= 0 || req.Password == "" || req.MountDir == "" {
 		jsonErr(w, "all fields are required and size_gb must be positive", http.StatusBadRequest)
+		return
+	}
+	if req.SizeGB > h.maxSizeGB {
+		jsonErr(w, fmt.Sprintf("size_gb exceeds maximum allowed size of %d GB", h.maxSizeGB), http.StatusBadRequest)
 		return
 	}
 	if !isValidVaultName(req.Name) {

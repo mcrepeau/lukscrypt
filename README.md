@@ -120,6 +120,7 @@ All configuration is via environment variables.
 | `VAULT_MOUNT_DIRS` | `/mnt` | Comma-separated list of base directories under which vaults are mounted |
 | `AUTH_USER` | `admin` | HTTP Basic Auth username |
 | `AUTH_PASSWORD` | *(generated)* | HTTP Basic Auth password. If unset, a random 32-character hex password is generated at startup and printed to the container logs. Set this to a stable value in production. |
+| `VAULT_MAX_SIZE_GB` | `100` | Maximum size in GB that a vault may be created with. Must be a positive integer. |
 
 ### Multiple storage / mount locations
 

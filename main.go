@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"lukscrypt/internal/api"
@@ -24,6 +25,7 @@ func main() {
 
 	storageDirs := parseList(os.Getenv("VAULT_STORAGE_DIRS"), "/vaults")
 	mountDirs   := parseList(os.Getenv("VAULT_MOUNT_DIRS"), "/mnt")
+	maxSizeGB   := parseMaxSize(os.Getenv("VAULT_MAX_SIZE_GB"), 100)
 
 	authUser := os.Getenv("AUTH_USER")
 	if authUser == "" {
@@ -49,7 +51,21 @@ func main() {
 	log.Printf("mount dirs: %v", mountDirs)
 	addr := ":8080"
 	log.Printf("vaultmgr listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, api.NewMux(database, webFiles, storageDirs, mountDirs, authUser, authPass)))
+	log.Printf("max vault size: %d GB", maxSizeGB)
+	log.Fatal(http.ListenAndServe(addr, api.NewMux(database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB)))
+}
+
+// parseMaxSize parses a positive integer env var, falling back to defaultVal.
+// Exits the process if the value is present but not a positive integer.
+func parseMaxSize(env string, defaultVal int) int {
+	if env == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(env)
+	if err != nil || n <= 0 {
+		log.Fatalf("VAULT_MAX_SIZE_GB must be a positive integer, got %q", env)
+	}
+	return n
 }
 
 // parseList splits a comma-separated env var and falls back to defaultVal if empty.
