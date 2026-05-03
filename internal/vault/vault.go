@@ -4,6 +4,7 @@
 package vault
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -281,6 +282,27 @@ func Delete(v *db.Vault) error {
 	return nil
 }
 
+// ReadMounts reads /proc/mounts once and returns the raw bytes. Pass the result
+// to StatusIn when checking multiple vaults in a single request to avoid
+// repeated file reads.
+func ReadMounts() []byte {
+	data, _ := os.ReadFile("/proc/mounts")
+	return data
+}
+
+// StatusIn derives the unlocked and mounted status for v from a pre-read
+// /proc/mounts snapshot. Use this in loops; use IsUnlocked/IsMounted for
+// single-vault paths where a fresh read is fine.
+func StatusIn(v *db.Vault, mounts []byte) (unlocked, mounted bool) {
+	mounted = mountedIn(v.MountPoint, mounts)
+	if _, err := os.Stat("/dev/mapper/" + v.MapperName); err == nil {
+		unlocked = true
+	} else {
+		unlocked = mounted
+	}
+	return unlocked, mounted
+}
+
 // IsUnlocked reports whether the LUKS device is open.
 // After a container restart the mapper device file may not be visible in the
 // container's /dev even though it still exists on the host, so we fall back to
@@ -300,13 +322,12 @@ func IsUnlocked(v *db.Vault) bool {
 //   - mount-point matching with space delimiters avoids false substring matches
 //     when one vault name is a prefix of another (e.g. "data" vs "data-2").
 func IsMounted(v *db.Vault) bool {
-	data, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return false
-	}
-	// Each /proc/mounts line is: <device> <mountpoint> <fstype> ...
-	// The mount point is always surrounded by spaces, so " /mnt/foo " won't
-	// accidentally match " /mnt/foobar ".
-	return strings.Contains(string(data), " "+v.MountPoint+" ")
+	return mountedIn(v.MountPoint, ReadMounts())
+}
+
+// mountedIn checks whether mountPoint appears as a mount destination in the
+// given /proc/mounts snapshot. Space delimiters prevent false prefix matches.
+func mountedIn(mountPoint string, mounts []byte) bool {
+	return bytes.Contains(mounts, []byte(" "+mountPoint+" "))
 }
 

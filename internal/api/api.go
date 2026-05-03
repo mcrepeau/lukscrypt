@@ -126,9 +126,10 @@ func (h *handler) listVaults(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to list vaults", http.StatusInternalServerError)
 		return
 	}
+	mounts := vault.ReadMounts()
 	resp := make([]vaultResponse, len(vaults))
 	for i, v := range vaults {
-		resp[i] = toResponse(v)
+		resp[i] = toResponse(v, mounts)
 	}
 	jsonOK(w, resp)
 }
@@ -282,7 +283,7 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	jsonOK(w, toResponse(*v))
+	jsonOK(w, toResponse(*v, vault.ReadMounts()))
 }
 
 func (h *handler) lockVault(w http.ResponseWriter, r *http.Request) {
@@ -301,7 +302,7 @@ func (h *handler) lockVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	jsonOK(w, toResponse(*v))
+	jsonOK(w, toResponse(*v, vault.ReadMounts()))
 }
 
 func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +333,8 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 
 // helpers
 
-func toResponse(v db.Vault) vaultResponse {
+func toResponse(v db.Vault, mounts []byte) vaultResponse {
+	unlocked, mounted := vault.StatusIn(&v, mounts)
 	resp := vaultResponse{
 		ID:         v.ID,
 		Name:       v.Name,
@@ -341,8 +343,8 @@ func toResponse(v db.Vault) vaultResponse {
 		MountPoint: v.MountPoint,
 		MapperName: v.MapperName,
 		CreatedAt:  v.CreatedAt,
-		Unlocked:   vault.IsUnlocked(&v),
-		Mounted:    vault.IsMounted(&v),
+		Unlocked:   unlocked,
+		Mounted:    mounted,
 	}
 	if resp.Mounted {
 		resp.DiskUsedBytes, resp.DiskTotalBytes = vault.DiskUsage(v.MountPoint)
