@@ -95,7 +95,97 @@ volumes:
 docker compose pull && docker compose up -d
 ```
 
-Access the UI at `http://<nas-ip>:8080`. Your browser will prompt for credentials.
+For local testing only, the UI is reachable at `http://<nas-ip>:8080`.
+**In production, do not expose port 8080 directly — put it behind a TLS-terminating reverse proxy** (see [Reverse proxy and HTTPS](#reverse-proxy-and-https) below).
+
+### Reverse proxy and HTTPS
+
+**HTTP Basic Auth sends credentials as base64-encoded plaintext.** Without TLS anyone on
+the same network can read the username and password from a single HTTP request. A
+TLS-terminating reverse proxy is required for any non-localhost deployment.
+
+#### Caddy (recommended — automatic TLS)
+
+```caddyfile
+vaultmgr.example.com {
+    reverse_proxy localhost:8080
+}
+```
+
+Run `caddy run` and Caddy handles certificate issuance and renewal automatically via
+Let's Encrypt. For a local domain (no public DNS) use a private CA or a self-signed cert:
+
+```caddyfile
+vaultmgr.nas.local {
+    tls internal
+    reverse_proxy localhost:8080
+}
+```
+
+#### Nginx
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name vaultmgr.example.com;
+
+    ssl_certificate     /etc/ssl/certs/vaultmgr.crt;
+    ssl_certificate_key /etc/ssl/private/vaultmgr.key;
+
+    location / {
+        proxy_pass         http://localhost:8080;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-For   $remote_addr;
+        # Required for SSE (vault creation progress stream)
+        proxy_buffering    off;
+        proxy_read_timeout 3600s;
+    }
+}
+server {
+    listen 80;
+    server_name vaultmgr.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+#### Docker network isolation
+
+When the reverse proxy runs in Docker too, bind vaultmgr to the internal network
+instead of exposing a host port:
+
+```yaml
+services:
+  lukscrypt:
+    image: registry.example.com/lukscrypt:latest
+    # No 'ports' mapping — not reachable from outside the Docker network
+    networks:
+      - proxy
+    environment:
+      # ... (same as above)
+    privileged: true
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+    networks:
+      - proxy
+
+networks:
+  proxy:
+
+volumes:
+  lukscrypt-data:
+  caddy-data:
+```
+
+With this layout `caddy` proxies to `http://lukscrypt:8080` and port 8080 is never
+exposed on the host.
 
 ### Mount propagation
 
@@ -215,14 +305,18 @@ When `fallocate` is unavailable the `creating` step emits incremental progress e
 
 ## Security considerations
 
+- **TLS is required in production.** HTTP Basic Auth transmits credentials as
+  base64-encoded plaintext. Without HTTPS any observer on the network can read your
+  username and password. Always serve this application through a TLS-terminating
+  reverse proxy (Caddy, Nginx, Traefik, etc.) and never expose port 8080 directly
+  on an untrusted network. See [Reverse proxy and HTTPS](#reverse-proxy-and-https).
 - **HTTP Basic Auth** is enforced on every endpoint, including the UI. If `AUTH_PASSWORD`
   is not set, a random 32-character password is generated at startup and printed once to the
   container logs. Set it explicitly in production so the password survives container restarts.
 - **Passwords are never passed as command-line arguments.** They are written to each
   `cryptsetup` subprocess's stdin and are not visible in `/proc/<pid>/cmdline`.
 - **The container runs as `privileged`** which grants full kernel access. Restrict
-  network exposure — do not expose port 8080 to the internet. Consider placing it behind
-  a TLS-terminating reverse proxy (e.g. Caddy, Nginx).
+  network exposure — do not expose port 8080 directly on untrusted interfaces.
 - **Vault names are strictly validated** server-side: only lowercase letters, numbers and
   hyphens are accepted. This prevents path traversal via crafted vault names.
 - **Storage and mount directories are allowlisted** server-side. The client cannot specify

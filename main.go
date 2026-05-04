@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"lukscrypt/internal/api"
 	"lukscrypt/internal/db"
@@ -49,10 +54,32 @@ func main() {
 
 	log.Printf("storage dirs: %v", storageDirs)
 	log.Printf("mount dirs: %v", mountDirs)
-	addr := ":8080"
-	log.Printf("vaultmgr listening on %s", addr)
 	log.Printf("max vault size: %d GB", maxSizeGB)
-	log.Fatal(http.ListenAndServe(addr, api.NewMux(database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB)))
+
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: api.NewMux(database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB),
+	}
+
+	go func() {
+		log.Printf("vaultmgr listening on %s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	sig := <-quit
+	log.Printf("received %s, shutting down", sig)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("shutdown timed out: %v", err)
+	}
+	log.Printf("shutdown complete")
 }
 
 // parseMaxSize parses a positive integer env var, falling back to defaultVal.
