@@ -6,7 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,6 +23,8 @@ import (
 var webFiles embed.FS
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
 		dbPath = "/data/vaultmgr.db"
@@ -40,21 +42,25 @@ func main() {
 	if authPass == "" {
 		b := make([]byte, 16)
 		if _, err := rand.Read(b); err != nil {
-			log.Fatalf("failed to generate auth password: %v", err)
+			slog.Error("failed to generate auth password", "err", err)
+			os.Exit(1)
 		}
 		authPass = hex.EncodeToString(b)
-		log.Printf("AUTH_PASSWORD not set — generated password for user %q: %s", authUser, authPass)
+		slog.Warn("AUTH_PASSWORD not set — generated password", "user", authUser, "password", authPass)
 	}
 
 	database, err := db.Open(dbPath)
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		slog.Error("failed to open database", "err", err)
+		os.Exit(1)
 	}
 	defer database.Close()
 
-	log.Printf("storage dirs: %v", storageDirs)
-	log.Printf("mount dirs: %v", mountDirs)
-	log.Printf("max vault size: %d GB", maxSizeGB)
+	slog.Info("starting",
+		"storage_dirs", storageDirs,
+		"mount_dirs", mountDirs,
+		"max_vault_size_gb", maxSizeGB,
+	)
 
 	srv := &http.Server{
 		Addr:    ":8080",
@@ -62,24 +68,26 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("vaultmgr listening on %s", srv.Addr)
+		slog.Info("vaultmgr listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
+			slog.Error("server error", "err", err)
+			os.Exit(1)
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-quit
-	log.Printf("received %s, shutting down", sig)
+	slog.Info("received signal, shutting down", "signal", sig.String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("shutdown timed out: %v", err)
+		slog.Error("shutdown timed out", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("shutdown complete")
+	slog.Info("shutdown complete")
 }
 
 // parseMaxSize parses a positive integer env var, falling back to defaultVal.
@@ -90,7 +98,8 @@ func parseMaxSize(env string, defaultVal int) int {
 	}
 	n, err := strconv.Atoi(env)
 	if err != nil || n <= 0 {
-		log.Fatalf("VAULT_MAX_SIZE_GB must be a positive integer, got %q", env)
+		slog.Error("VAULT_MAX_SIZE_GB must be a positive integer", "value", env)
+		os.Exit(1)
 	}
 	return n
 }

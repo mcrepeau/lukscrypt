@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -52,6 +52,24 @@ type handler struct {
 	pendingNames   map[string]struct{} // names of vaults currently being created
 	unlockLimiters map[string]*unlockEntry
 	unlockMu       sync.Mutex
+}
+
+// responseWriter wraps http.ResponseWriter to capture the status code for
+// request logging. It forwards Flush so SSE streams continue to work.
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.status = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // vaultResponse is the JSON shape sent to the frontend.
@@ -101,7 +119,21 @@ func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string,
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 
-	return h.securityHeaders(h.basicAuth(mux))
+	authenticated := h.requestLogger(h.securityHeaders(h.basicAuth(mux)))
+
+	// /healthz is unauthenticated so container orchestrators can probe it without credentials.
+	top := http.NewServeMux()
+	top.HandleFunc("GET /healthz", h.healthz)
+	top.Handle("/", authenticated)
+	return top
+}
+
+func (h *handler) healthz(w http.ResponseWriter, r *http.Request) {
+	if err := h.db.Ping(); err != nil {
+		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +284,7 @@ func (h *handler) vaultEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			data, err := json.Marshal(event)
 			if err != nil {
-				log.Printf("marshal event: %v", err)
+				slog.Error("marshal SSE event", "err", err)
 				continue
 			}
 			fmt.Fprintf(w, "data: %s\n\n", data)
@@ -354,7 +386,7 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := vault.Delete(v); err != nil {
-		log.Printf("vault %q: DB record deleted but filesystem cleanup failed: %v", v.Name, err)
+		slog.Warn("filesystem cleanup failed after DB delete", "vault", v.Name, "err", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -477,6 +509,22 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+// requestLogger logs method, path, status, and duration for every request.
+func (h *handler) requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+		slog.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"ip", clientIP(r),
+		)
+	})
 }
 
 // securityHeaders sets defensive HTTP headers on every response.

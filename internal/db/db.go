@@ -60,6 +60,7 @@ func migrate(conn *sql.DB) error {
 }
 
 func (d *DB) Close() error { return d.conn.Close() }
+func (d *DB) Ping() error  { return d.conn.Ping() }
 
 func (d *DB) CreateVault(name, path string, sizeGB int, mountPoint, mapperName string) (*Vault, error) {
 	res, err := d.conn.Exec(
