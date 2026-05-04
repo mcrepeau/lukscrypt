@@ -151,6 +151,10 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "all fields are required and size_gb must be positive", http.StatusBadRequest)
 		return
 	}
+	if len(req.Password) < 8 {
+		jsonErr(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
 	if req.SizeGB > h.maxSizeGB {
 		jsonErr(w, fmt.Sprintf("size_gb exceeds maximum allowed size of %d GB", h.maxSizeGB), http.StatusBadRequest)
 		return
@@ -272,6 +276,10 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 	}
 	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Password == "" {
 		jsonErr(w, "password is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.Password) < 8 {
+		jsonErr(w, "password must be at least 8 characters", http.StatusBadRequest)
 		return
 	}
 	v, ok := h.lookupVault(w, id)

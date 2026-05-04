@@ -137,6 +137,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 		exec.Command("cryptsetup", "luksClose", mapperName).Run()
 		fail("set mount point permissions", err)
 		os.Remove(imgPath)
+		os.Remove(mountPoint)
 		return
 	}
 
@@ -147,6 +148,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 		exec.Command("cryptsetup", "luksClose", mapperName).Run()
 		fail("save vault to database", err)
 		os.Remove(imgPath)
+		os.Remove(mountPoint)
 		return
 	}
 
