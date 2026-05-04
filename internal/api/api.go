@@ -1,4 +1,4 @@
-// Package api wires up the HTTP router and handlers for the vaultmgr web UI
+// Package api wires up the HTTP router and handlers for the lukscrypt web UI
 // and JSON API. All state-mutating vault operations are serialized through a
 // single mutex to prevent device-mapper races under concurrent requests.
 package api
@@ -18,9 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
 	"lukscrypt/internal/db"
 	"lukscrypt/internal/vault"
+
+	"golang.org/x/time/rate"
 )
 
 // unlockEntry pairs a rate limiter with a last-seen timestamp for cleanup.
@@ -557,7 +558,7 @@ func (h *handler) basicAuth(next http.Handler) http.Handler {
 		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(h.authUser))
 		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(h.authPass))
 		if !ok || userMatch != 1 || passMatch != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="vaultmgr"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="lukscrypt"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

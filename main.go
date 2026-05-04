@@ -27,12 +27,12 @@ func main() {
 
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
-		dbPath = "/data/vaultmgr.db"
+		dbPath = "/data/lukscrypt.db"
 	}
 
 	storageDirs := parseList(os.Getenv("VAULT_STORAGE_DIRS"), "/vaults")
-	mountDirs   := parseList(os.Getenv("VAULT_MOUNT_DIRS"), "/mnt")
-	maxSizeGB   := parseMaxSize(os.Getenv("VAULT_MAX_SIZE_GB"), 100)
+	mountDirs := parseList(os.Getenv("VAULT_MOUNT_DIRS"), "/mnt")
+	maxSizeGB := parseMaxSize(os.Getenv("VAULT_MAX_SIZE_GB"), 100)
 
 	authUser := os.Getenv("AUTH_USER")
 	if authUser == "" {
@@ -68,7 +68,7 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("vaultmgr listening", "addr", srv.Addr)
+		slog.Info("lukscrypt listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "err", err)
 			os.Exit(1)

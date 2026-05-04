@@ -19,7 +19,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 ## Architecture
 
 ```
-vaultmgr/
+lukscrypt/
 ├── main.go                  # Entry point — reads env, opens DB, starts HTTP server
 ├── internal/
 │   ├── api/api.go           # HTTP router and handlers (Go 1.22 stdlib mux)
@@ -107,7 +107,7 @@ TLS-terminating reverse proxy is required for any non-localhost deployment.
 #### Caddy (recommended — automatic TLS)
 
 ```caddyfile
-vaultmgr.example.com {
+lukscrypt.example.com {
     reverse_proxy localhost:8080
 }
 ```
@@ -116,7 +116,7 @@ Run `caddy run` and Caddy handles certificate issuance and renewal automatically
 Let's Encrypt. For a local domain (no public DNS) use a private CA or a self-signed cert:
 
 ```caddyfile
-vaultmgr.nas.local {
+lukscrypt.nas.local {
     tls internal
     reverse_proxy localhost:8080
 }
@@ -127,10 +127,10 @@ vaultmgr.nas.local {
 ```nginx
 server {
     listen 443 ssl;
-    server_name vaultmgr.example.com;
+    server_name lukscrypt.example.com;
 
-    ssl_certificate     /etc/ssl/certs/vaultmgr.crt;
-    ssl_certificate_key /etc/ssl/private/vaultmgr.key;
+    ssl_certificate     /etc/ssl/certs/lukscrypt.crt;
+    ssl_certificate_key /etc/ssl/private/lukscrypt.key;
 
     location / {
         proxy_pass         http://localhost:8080;
@@ -143,14 +143,14 @@ server {
 }
 server {
     listen 80;
-    server_name vaultmgr.example.com;
+    server_name luk.example.com;
     return 301 https://$host$request_uri;
 }
 ```
 
 #### Docker network isolation
 
-When the reverse proxy runs in Docker too, bind vaultmgr to the internal network
+When the reverse proxy runs in Docker too, bind lukscrypt to the internal network
 instead of exposing a host port:
 
 ```yaml
