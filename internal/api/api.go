@@ -4,9 +4,11 @@
 package api
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -219,7 +221,15 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 	h.pendingNames[req.Name] = struct{}{}
 	h.opMu.Unlock()
 
-	jobID := fmt.Sprintf("%d", time.Now().UnixNano())
+	var idBytes [8]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		jsonErr(w, "failed to generate job id", http.StatusInternalServerError)
+		h.opMu.Lock()
+		delete(h.pendingNames, req.Name)
+		h.opMu.Unlock()
+		return
+	}
+	jobID := hex.EncodeToString(idBytes[:])
 	ch := make(chan vault.ProgressEvent, 64)
 
 	h.jobsMu.Lock()
@@ -228,6 +238,12 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer func() {
+			// vault.Create's own defer closes ch, so we must not close or send
+			// on it here — only log. Without this recover, a panic would crash
+			// the entire server process.
+			if r := recover(); r != nil {
+				slog.Error("panic in vault.Create goroutine", "vault", req.Name, "panic", r)
+			}
 			h.opMu.Lock()
 			delete(h.pendingNames, req.Name)
 			h.opMu.Unlock()
