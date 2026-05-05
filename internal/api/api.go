@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
@@ -39,6 +40,7 @@ type jobEntry struct {
 }
 
 type handler struct {
+	ctx         context.Context
 	db          *db.DB
 	webFS       embed.FS
 	storageDirs []string
@@ -90,8 +92,9 @@ type vaultResponse struct {
 	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 }
 
-func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int) http.Handler {
+func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int) http.Handler {
 	h := &handler{
+		ctx:            ctx,
 		db:             database,
 		webFS:          webFiles,
 		storageDirs:    storageDirs,
@@ -103,8 +106,8 @@ func NewMux(database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string,
 		pendingNames:   make(map[string]struct{}),
 		unlockLimiters: make(map[string]*unlockEntry),
 	}
-	go h.cleanupLimiters()
-	go h.cleanupJobs()
+	go h.cleanupLimiters(ctx)
+	go h.cleanupJobs(ctx)
 
 	mux := http.NewServeMux()
 	// Static
@@ -248,7 +251,7 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 			delete(h.pendingNames, req.Name)
 			h.opMu.Unlock()
 		}()
-		vault.Create(h.db, req.Name, req.Path, req.SizeGB, req.Password, mountPoint, ch)
+		vault.Create(h.ctx, h.db, req.Name, req.Path, req.SizeGB, req.Password, mountPoint, ch)
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -481,33 +484,43 @@ func (h *handler) unlockAllowed(r *http.Request) bool {
 // This covers the case where a client POSTs to /api/vaults but never connects
 // to the SSE endpoint to consume the channel — the goroutine finishes and closes
 // the channel, but the map entry would otherwise linger forever.
-func (h *handler) cleanupJobs() {
+func (h *handler) cleanupJobs(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		h.jobsMu.Lock()
-		for id, e := range h.jobs {
-			if time.Since(e.created) > 30*time.Minute {
-				delete(h.jobs, id)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.jobsMu.Lock()
+			for id, e := range h.jobs {
+				if time.Since(e.created) > 30*time.Minute {
+					delete(h.jobs, id)
+				}
 			}
+			h.jobsMu.Unlock()
 		}
-		h.jobsMu.Unlock()
 	}
 }
 
 // cleanupLimiters removes rate-limiter entries that have been idle for more
 // than 10 minutes to prevent unbounded memory growth.
-func (h *handler) cleanupLimiters() {
+func (h *handler) cleanupLimiters(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		h.unlockMu.Lock()
-		for ip, e := range h.unlockLimiters {
-			if time.Since(e.lastSeen) > 10*time.Minute {
-				delete(h.unlockLimiters, ip)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.unlockMu.Lock()
+			for ip, e := range h.unlockLimiters {
+				if time.Since(e.lastSeen) > 10*time.Minute {
+					delete(h.unlockLimiters, ip)
+				}
 			}
+			h.unlockMu.Unlock()
 		}
-		h.unlockMu.Unlock()
 	}
 }
 

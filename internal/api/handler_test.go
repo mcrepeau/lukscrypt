@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -27,7 +28,7 @@ func newTestMux(t *testing.T) (http.Handler, *db.DB) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	h := NewMux(database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100)
+	h := NewMux(context.Background(), database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100)
 	return h, database
 }
 

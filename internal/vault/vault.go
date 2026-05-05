@@ -5,6 +5,7 @@ package vault
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,7 +28,9 @@ type ProgressEvent struct {
 
 // Create runs the full vault creation pipeline and streams progress to ch.
 // ch is closed when the operation completes (successfully or not).
-func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint string, ch chan<- ProgressEvent) {
+// ctx cancellation interrupts any in-progress subprocess (fallocate, dd,
+// cryptsetup, mkfs, mount) and triggers cleanup of partial state.
+func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int, password, mountPoint string, ch chan<- ProgressEvent) {
 	defer close(ch)
 
 	send := func(step, msg string, pct int) {
@@ -72,7 +75,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 
 	// Step 1: allocate container file (fallocate if available, dd otherwise)
 	send("creating", fmt.Sprintf("Allocating %d GB container file...", sizeGB), 0)
-	if err := allocateFile(imgPath, sizeGB, ch); err != nil {
+	if err := allocateFile(ctx, imgPath, sizeGB, ch); err != nil {
 		fail("create container file", err)
 		os.Remove(imgPath)
 		return
@@ -80,7 +83,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 
 	// Step 2: LUKS format
 	send("encrypting", "Encrypting vault with LUKS...", 62)
-	cmd := exec.Command("cryptsetup", "luksFormat", "--batch-mode", imgPath)
+	cmd := exec.CommandContext(ctx, "cryptsetup", "luksFormat", "--batch-mode", imgPath)
 	cmd.Stdin = strings.NewReader(password)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fail(fmt.Sprintf("luksFormat (%s)", strings.TrimSpace(string(out))), err)
@@ -90,7 +93,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 
 	// Step 3: open LUKS device
 	send("opening", "Opening LUKS device...", 75)
-	cmd = exec.Command("cryptsetup", "luksOpen", imgPath, mapperName)
+	cmd = exec.CommandContext(ctx, "cryptsetup", "luksOpen", imgPath, mapperName)
 	cmd.Stdin = strings.NewReader(password)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fail(fmt.Sprintf("luksOpen (%s)", strings.TrimSpace(string(out))), err)
@@ -105,7 +108,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 	if len(label) > 16 {
 		label = label[:16]
 	}
-	cmd = exec.Command("mkfs.ext4", "-L", label, "/dev/mapper/"+mapperName)
+	cmd = exec.CommandContext(ctx, "mkfs.ext4", "-L", label, "/dev/mapper/"+mapperName)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		exec.Command("cryptsetup", "luksClose", mapperName).Run()
 		fail(fmt.Sprintf("mkfs.ext4 (%s)", strings.TrimSpace(string(out))), err)
@@ -121,7 +124,7 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 		os.Remove(imgPath)
 		return
 	}
-	cmd = exec.Command("mount", "/dev/mapper/"+mapperName, mountPoint)
+	cmd = exec.CommandContext(ctx, "mount", "/dev/mapper/"+mapperName, mountPoint)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		exec.Command("cryptsetup", "luksClose", mapperName).Run()
 		fail(fmt.Sprintf("mount (%s)", strings.TrimSpace(string(out))), err)
@@ -168,9 +171,9 @@ func Create(database *db.DB, name, path string, sizeGB int, password, mountPoint
 // which is near-instantaneous on most Linux filesystems. If fallocate is
 // unavailable or the filesystem doesn't support it (NFS, some older FS types),
 // it falls back to dd which zeroes every block and reports real progress.
-func allocateFile(imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
+func allocateFile(ctx context.Context, imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
 	size := int64(sizeGB) * 1024 * 1024 * 1024
-	cmd := exec.Command("fallocate", "-l", fmt.Sprintf("%d", size), imgPath)
+	cmd := exec.CommandContext(ctx, "fallocate", "-l", fmt.Sprintf("%d", size), imgPath)
 	if err := cmd.Run(); err == nil {
 		select {
 		case ch <- ProgressEvent{Step: "creating", Message: "Container file allocated.", Percent: 60}:
@@ -180,12 +183,12 @@ func allocateFile(imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
 	}
 	// fallocate failed — clean up any partial file it may have left, then use dd.
 	os.Remove(imgPath)
-	return createFile(imgPath, sizeGB, ch)
+	return createFile(ctx, imgPath, sizeGB, ch)
 }
 
 // createFile runs dd and monitors file growth to send progress updates to ch.
-func createFile(imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
-	cmd := exec.Command("dd",
+func createFile(ctx context.Context, imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
+	cmd := exec.CommandContext(ctx, "dd",
 		"if=/dev/zero",
 		"of="+imgPath,
 		"bs=1M",
@@ -204,6 +207,12 @@ func createFile(imgPath string, sizeGB int, ch chan<- ProgressEvent) error {
 
 	for {
 		select {
+		case <-ctx.Done():
+			// Context cancelled (server shutting down). CommandContext will
+			// send SIGKILL to dd; wait for it to actually exit before
+			// returning so the caller can safely remove the partial file.
+			<-errCh
+			return ctx.Err()
 		case err := <-errCh:
 			return err
 		case <-ticker.C:

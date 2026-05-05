@@ -62,9 +62,15 @@ func main() {
 		"max_vault_size_gb", maxSizeGB,
 	)
 
+	// serverCtx is cancelled on shutdown to stop background goroutines and
+	// interrupt any in-progress vault creation (dd, cryptsetup, etc.) so that
+	// SSE connections close naturally before Shutdown drains HTTP connections.
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
+
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: api.NewMux(database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB),
+		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB),
 	}
 
 	go func() {
@@ -80,10 +86,15 @@ func main() {
 	sig := <-quit
 	slog.Info("received signal, shutting down", "signal", sig.String())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Cancel first: in-flight vault operations are interrupted, cleanup
+	// goroutines exit, and open SSE streams receive any final events and close.
+	// Shutdown then waits for remaining HTTP connections to drain.
+	serverCancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer drainCancel()
+
+	if err := srv.Shutdown(drainCtx); err != nil {
 		slog.Error("shutdown timed out", "err", err)
 		os.Exit(1)
 	}
