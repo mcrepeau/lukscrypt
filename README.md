@@ -44,28 +44,14 @@ container ships as a single static executable with no external file dependencies
 
 ## Deployment
 
-### 1. Build and push the image
+### 1. Configure `docker-compose.yml`
 
-```bash
-# For ARM64 NAS (e.g. Raspberry Pi, most Synology/QNAP models)
-docker buildx build \
-  --platform linux/arm64 \
-  -t registry.example.com/lukscrypt:latest \
-  --push .
-
-# For AMD64
-docker buildx build \
-  --platform linux/amd64 \
-  -t registry.example.com/lukscrypt:latest \
-  --push .
-```
-
-### 2. Configure `docker-compose.yml`
+Pre-built images for `linux/amd64` and `linux/arm64` are published to the GitHub Container Registry on every tagged release.
 
 ```yaml
 services:
   lukscrypt:
-    image: registry.example.com/lukscrypt:latest
+    image: ghcr.io/mcrepeau/lukscrypt:latest
     container_name: lukscrypt
     ports:
       - "8080:8080"
@@ -89,7 +75,7 @@ volumes:
   lukscrypt-data:
 ```
 
-### 3. Deploy on the NAS
+### 2. Deploy on the NAS
 
 ```bash
 docker compose pull && docker compose up -d
@@ -156,7 +142,7 @@ instead of exposing a host port:
 ```yaml
 services:
   lukscrypt:
-    image: registry.example.com/lukscrypt:latest
+    image: ghcr.io/mcrepeau/lukscrypt:latest
     # No 'ports' mapping — not reachable from outside the Docker network
     networks:
       - proxy
@@ -263,17 +249,19 @@ and mount point directory are deleted from disk.
 
 ## API reference
 
-All endpoints require HTTP Basic Auth.
+All endpoints except `/healthz` require HTTP Basic Auth.
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/config` | Returns allowed storage and mount directories |
-| `GET` | `/api/vaults` | Lists all vaults with live mounted/unlocked status |
-| `POST` | `/api/vaults` | Creates a new vault (returns `202` with `job_id`) |
-| `GET` | `/api/vaults/events/{job_id}` | SSE stream for vault creation progress |
-| `POST` | `/api/vaults/{id}/unlock` | Unlocks and mounts a vault |
-| `POST` | `/api/vaults/{id}/lock` | Unmounts and locks a vault |
-| `DELETE` | `/api/vaults/{id}` | Deletes a locked vault (image file + mount directory) |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/healthz` | No | Health check — returns `{"status":"ok","version":"..."}` |
+| `GET` | `/api/config` | Yes | Returns allowed storage and mount directories |
+| `GET` | `/api/vaults` | Yes | Lists all vaults with live mounted/unlocked status |
+| `POST` | `/api/vaults` | Yes | Creates a new vault (returns `202` with `job_id`) |
+| `GET` | `/api/vaults/events/{job_id}` | Yes | SSE stream for vault creation progress |
+| `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault |
+| `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
+| `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
+| `DELETE` | `/api/vaults/{id}` | Yes | Deletes a locked vault (image file + mount directory) |
 
 ### Create vault request body
 
@@ -333,6 +321,12 @@ go run .
 
 # Build binary
 CGO_ENABLED=0 go build -ldflags="-s -w" -o lukscrypt .
+
+# Build with version string
+CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=v1.0.0" -o lukscrypt .
+
+# Run tests
+go test ./...
 
 # Vet
 go vet ./...
