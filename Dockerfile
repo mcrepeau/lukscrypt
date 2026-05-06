@@ -6,13 +6,15 @@
 FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS builder
 
 ARG TARGETARCH
+ARG VERSION=dev
 
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -ldflags="-s -w" -o /lukscrypt .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
+    go build -ldflags="-s -w -X main.version=${VERSION}" -o /lukscrypt .
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim

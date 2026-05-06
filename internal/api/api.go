@@ -41,6 +41,7 @@ type jobEntry struct {
 
 type handler struct {
 	ctx         context.Context
+	version     string
 	db          *db.DB
 	webFS       embed.FS
 	storageDirs []string
@@ -92,9 +93,10 @@ type vaultResponse struct {
 	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 }
 
-func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int) http.Handler {
+func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int, version string) http.Handler {
 	h := &handler{
 		ctx:            ctx,
+		version:        version,
 		db:             database,
 		webFS:          webFiles,
 		storageDirs:    storageDirs,
@@ -139,7 +141,7 @@ func (h *handler) healthz(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	jsonOK(w, map[string]string{"status": "ok"})
+	jsonOK(w, map[string]string{"status": "ok", "version": h.version})
 }
 
 func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {

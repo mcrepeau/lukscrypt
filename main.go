@@ -22,6 +22,11 @@ import (
 //go:embed web/index.html
 var webFiles embed.FS
 
+// version is overridden at build time via:
+//
+//	go build -ldflags="-X main.version=v1.2.3"
+var version = "dev"
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
@@ -57,6 +62,7 @@ func main() {
 	defer database.Close()
 
 	slog.Info("starting",
+		"version", version,
 		"storage_dirs", storageDirs,
 		"mount_dirs", mountDirs,
 		"max_vault_size_gb", maxSizeGB,
@@ -70,7 +76,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB),
+		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, version),
 	}
 
 	go func() {
