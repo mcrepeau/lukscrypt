@@ -188,6 +188,27 @@
     margin-top: auto;
   }
 
+  /* ── LUKS header details expander ── */
+  .vault-details {
+    display: none;
+    margin-top: .75rem;
+    padding-top: .75rem;
+    border-top: 1px dashed var(--border);
+  }
+  .vault-details .vault-meta { gap: .3rem; }
+  .keyslot-chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: .68rem;
+    background: rgba(99,102,241,.15);
+    color: #a5b4fc;
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin: 2px 4px 2px 0;
+  }
+  .vault-details .details-loading { color: var(--text-dim); font-size: .78rem; }
+  .vault-details .details-error   { color: var(--danger); font-size: .78rem; }
+
   /* ── Empty state ── */
   .empty-state {
     grid-column: 1 / -1;
@@ -758,8 +779,14 @@ function vaultCard(v) {
         <div class="meta-row"><span class="meta-label">Created</span><span class="meta-value">${fmtDate(v.created_at)}</span></div>
       </div>
       ${usageHtml}
+      <div class="vault-details" id="vault-details-${v.id}"></div>
       <div class="vault-actions">
         ${lockBtn}
+        <button class="btn btn-ghost" onclick="toggleDetails(${v.id})">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>
+          </svg>Details
+        </button>
         <button class="btn btn-danger" onclick="showDelete(${v.id})" ${(v.mounted || open) ? 'disabled title="Lock vault before deleting"' : ''}>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
             <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
@@ -767,6 +794,46 @@ function vaultCard(v) {
           </svg>Delete
         </button>
       </div>
+    </div>`;
+}
+
+// ── LUKS header details ───────────────────────────────────────────────────────
+// Fetched lazily on first expand and cached per vault id; the header only
+// changes when keyslots are mutated, so no refresh affordance is needed.
+const detailsCache = new Map();
+
+async function toggleDetails(id) {
+  const wrap = document.getElementById('vault-details-' + id);
+  if (wrap.style.display === 'block') { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  if (wrap.dataset.loaded === '1') return;
+
+  if (!detailsCache.has(id)) {
+    wrap.innerHTML = '<div class="details-loading">Reading LUKS header…</div>';
+    try {
+      detailsCache.set(id, await api('GET', `/api/vaults/details/${id}`));
+    } catch (e) {
+      wrap.innerHTML = `<div class="details-error">${esc(e.message)}</div>`;
+      return;
+    }
+  }
+  wrap.innerHTML = renderDetails(detailsCache.get(id));
+  wrap.dataset.loaded = '1';
+}
+
+function renderDetails(d) {
+  const slots = (d.keyslots || []).map(k =>
+    `<span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)} &middot; ${esc(k.status)}</span>`
+  ).join('') || '<span class="meta-value">none</span>';
+
+  return `
+    <div class="vault-meta">
+      <div class="meta-row"><span class="meta-label">LUKS</span><span class="meta-value">v${esc(d.version)}</span></div>
+      <div class="meta-row"><span class="meta-label">Cipher</span><span class="meta-value mono">${esc(d.cipher)}</span></div>
+      <div class="meta-row"><span class="meta-label">Hash</span><span class="meta-value mono">${esc(d.hash)}</span></div>
+      <div class="meta-row"><span class="meta-label">Key</span><span class="meta-value">${d.key_size_bits} bits</span></div>
+      <div class="meta-row"><span class="meta-label">UUID</span><span class="meta-value mono">${esc(d.uuid)}</span></div>
+      <div class="meta-row"><span class="meta-label">Keyslots</span><span class="meta-value">${slots}</span></div>
     </div>`;
 }
 

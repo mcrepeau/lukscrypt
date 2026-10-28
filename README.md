@@ -7,6 +7,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 
 - Create encrypted vault image files backed by LUKS (via `cryptsetup`)
 - Unlock (open + mount) and lock (unmount + close) vaults from the browser
+- View LUKS header details per vault (version, cipher, hash, key size, keyslots, UUID) — lazily loaded, works on locked vaults
 - Real-time creation progress over Server-Sent Events
 - Fast allocation via `fallocate` (near-instantaneous); falls back to `dd` on unsupported filesystems
 - HTTP Basic Auth — a random password is generated on first start if none is configured
@@ -24,7 +25,8 @@ lukscrypt/
 ├── internal/
 │   ├── api/api.go           # HTTP router and handlers (Go 1.22 stdlib mux)
 │   ├── db/db.go             # SQLite store for vault metadata (modernc.org/sqlite)
-│   └── vault/vault.go       # LUKS operations: create, unlock, lock, delete
+│   ├── vault/vault.go       # LUKS operations: create, unlock, lock, delete
+│   └── vault/luksdump.go    # LUKS header details (luksDump / --dump-json-metadata)
 └── web/index.html           # Single-page UI — dark theme, SSE progress, embedded in binary
 ```
 
@@ -268,6 +270,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault |
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
+| `GET` | `/api/vaults/details/{id}` | Yes | LUKS header details (cipher, hash, key size, keyslots, UUID) — read-only, no passphrase required, works on locked vaults |
 | `DELETE` | `/api/vaults/{id}` | Yes | Deletes a locked vault (image file + mount directory); returns `422` if the vault is still unlocked |
 
 ### Create vault request body
@@ -283,6 +286,28 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 ```
 
 Vault names must match `[a-z0-9-]{1,64}`.
+
+### LUKS details response
+
+`GET /api/vaults/details/{id}` returns a summary of the vault's LUKS header:
+
+```json
+{
+  "version": "2",
+  "cipher": "aes-xts-plain64",
+  "hash": "sha256",
+  "key_size_bits": 512,
+  "uuid": "6a2f5e10-94c3-4d7a-8f21-0b3c9e8d7a1f",
+  "keyslots": [
+    {"index": 0, "type": "argon2id", "status": "valid"}
+  ]
+}
+```
+
+The literal `details` segment comes before `{id}` to avoid a routing-pattern conflict
+with `/api/vaults/events/{jobID}` (Go's stdlib mux cannot constrain wildcards with
+regexes). If the image file is missing or not a LUKS container, the endpoint returns
+`422` with the `cryptsetup` error message.
 
 ### SSE event format
 
@@ -325,6 +350,10 @@ When `fallocate` is unavailable the `creating` step emits incremental progress e
   browser-sent `Origin` header and refuse cross-site requests, so a malicious web page
   cannot trigger lock/mount/delete actions with the browser's cached Basic Auth
   credentials. Non-browser clients (curl, scripts) send no `Origin` and are unaffected.
+- **LUKS header details expose no key material.** `cryptsetup luksDump` (and its LUKS2
+  `--dump-json-metadata` variant) read only non-secret header fields — cipher parameters,
+  keyslot metadata and identifiers — and the endpoint sits behind the same Basic Auth
+  as every other API route.
 
 ## Development
 

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"lukscrypt/internal/db"
+	"lukscrypt/internal/vault"
 )
 
 // newTestMux builds a NewMux wired to an in-memory SQLite database.
@@ -599,5 +600,83 @@ func TestMountVaultNotUnlocked(t *testing.T) {
 	// Vault is locked in the test environment, so Mount returns an error.
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("got %d, want 422", w.Code)
+	}
+}
+
+// --- GET /api/vaults/{id}/details ----------------------------------------------
+
+func stubDumpDetails(t *testing.T, fn func(*db.Vault) (*vault.LUKSDetails, error)) {
+	t.Helper()
+	orig := vaultDumpDetails
+	vaultDumpDetails = fn
+	t.Cleanup(func() { vaultDumpDetails = orig })
+}
+
+func TestVaultDetails(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+
+	// The dump function is stubbed because no real cryptsetup/LUKS image
+	// exists in the test environment.
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return &vault.LUKSDetails{
+			Version:     "2",
+			Cipher:      "aes-xts-plain64",
+			Hash:        "sha256",
+			KeySizeBits: 512,
+			UUID:        "6a2f5e10-94c3-4d7a-8f21-0b3c9e8d7a1f",
+			KeySlots:    []vault.KeySlot{{Index: 0, Type: "argon2id", Status: "valid"}},
+		}, nil
+	})
+
+	w := auth(h, http.MethodGet, fmt.Sprintf("/api/vaults/details/%d", v.ID), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp vault.LUKSDetails
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Version != "2" || resp.Cipher != "aes-xts-plain64" || resp.KeySizeBits != 512 {
+		t.Errorf("unexpected details: %+v", resp)
+	}
+	if len(resp.KeySlots) != 1 || resp.KeySlots[0].Type != "argon2id" {
+		t.Errorf("keyslots = %+v", resp.KeySlots)
+	}
+}
+
+func TestVaultDetailsNotFound(t *testing.T) {
+	h, _ := newTestMux(t)
+	w := auth(h, http.MethodGet, "/api/vaults/details/99999", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", w.Code)
+	}
+}
+
+func TestVaultDetailsInvalidID(t *testing.T) {
+	h, _ := newTestMux(t)
+	w := auth(h, http.MethodGet, "/api/vaults/details/notanid", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("got %d, want 400", w.Code)
+	}
+}
+
+// A record whose image file is missing (or not a LUKS container) must produce
+// a 422 with the cryptsetup error, not a 500.
+func TestVaultDetailsDumpFailure(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return nil, fmt.Errorf("luksDump: Device /vaults/testvault.img is not a valid LUKS device")
+	})
+	w := auth(h, http.MethodGet, fmt.Sprintf("/api/vaults/details/%d", v.ID), nil)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422; body: %s", w.Code, w.Body.String())
 	}
 }

@@ -127,6 +127,11 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	mux.HandleFunc("POST /api/vaults/{id}/unlock", h.unlockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/lock", h.lockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/mount", h.mountVault)
+	// LUKS header details — read-only, no opMu needed (never touches device-mapper).
+	// The literal "details" segment comes before {id} because any pattern of the
+	// form {id}/<literal> would ambiguously overlap the events/{jobID} route
+	// (Go's stdlib mux has no inline regex to constrain wildcards).
+	mux.HandleFunc("GET /api/vaults/details/{id}", h.vaultDetails)
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 
@@ -390,6 +395,29 @@ func (h *handler) mountVault(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, toResponse(*v, vault.ReadMounts()))
 }
 
+// vaultDetails returns the vault's LUKS header information (cipher, hash,
+// key size, keyslots, UUID). Only the header is read — no passphrase is
+// required and the vault may be locked or unlocked.
+func (h *handler) vaultDetails(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		jsonErr(w, "invalid vault id", http.StatusBadRequest)
+		return
+	}
+	v, ok := h.lookupVault(w, id)
+	if !ok {
+		return
+	}
+	d, err := vaultDumpDetails(v)
+	if err != nil {
+		// The image file is unreadable or not a LUKS container (e.g. deleted
+		// on disk while the DB record remains).
+		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	jsonOK(w, d)
+}
+
 func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
 	if err != nil {
@@ -621,6 +649,10 @@ func (h *handler) csrfGuard(next http.Handler) http.Handler {
 // vaultIsUnlocked is a package-level indirection over vault.IsUnlocked so
 // tests can simulate an unlocked vault without a real /dev/mapper entry.
 var vaultIsUnlocked = vault.IsUnlocked
+
+// vaultDumpDetails is a package-level indirection over vault.DumpDetails so
+// tests can stub the cryptsetup subprocess.
+var vaultDumpDetails = vault.DumpDetails
 
 func (h *handler) basicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
