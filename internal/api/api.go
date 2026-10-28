@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,7 @@ type handler struct {
 	authUser    string
 	authPass    string
 	maxSizeGB   int
+	trustProxy  bool
 	jobs        map[string]*jobEntry
 	jobsMu      sync.Mutex
 	// opMu serializes vault state-changing operations (lock/unlock/create) to
@@ -93,7 +95,7 @@ type vaultResponse struct {
 	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 }
 
-func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int, version string) http.Handler {
+func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int, trustProxy bool, version string) http.Handler {
 	h := &handler{
 		ctx:            ctx,
 		version:        version,
@@ -104,6 +106,7 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 		authUser:       authUser,
 		authPass:       authPass,
 		maxSizeGB:      maxSizeGB,
+		trustProxy:     trustProxy,
 		jobs:           make(map[string]*jobEntry),
 		pendingNames:   make(map[string]struct{}),
 		unlockLimiters: make(map[string]*unlockEntry),
@@ -127,7 +130,7 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 
-	authenticated := h.requestLogger(h.securityHeaders(h.basicAuth(mux)))
+	authenticated := h.requestLogger(h.securityHeaders(h.csrfGuard(h.basicAuth(mux))))
 
 	// /healthz is unauthenticated so container orchestrators can probe it without credentials.
 	top := http.NewServeMux()
@@ -399,6 +402,13 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 	}
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
+	// Refuse before touching the DB: if the record were removed first, an
+	// unlocked vault would vanish from the UI while its image and mounted
+	// filesystem stay live on disk.
+	if vaultIsUnlocked(v) {
+		jsonErr(w, "vault must be locked before deletion", http.StatusUnprocessableEntity)
+		return
+	}
 	// Delete the DB record first. If the filesystem cleanup subsequently fails,
 	// we log the orphaned files for manual removal — but there is no ghost entry
 	// in the DB. Reversing this order would leave a ghost entry pointing at a
@@ -469,7 +479,7 @@ func jsonErr(w http.ResponseWriter, msg string, code int) {
 // is allowed every 30 seconds. This limits brute-force password guessing while
 // still allowing a user to quickly retry after a typo.
 func (h *handler) unlockAllowed(r *http.Request) bool {
-	ip := clientIP(r)
+	ip := clientIP(r, h.trustProxy)
 	h.unlockMu.Lock()
 	e, ok := h.unlockLimiters[ip]
 	if !ok {
@@ -526,15 +536,20 @@ func (h *handler) cleanupLimiters(ctx context.Context) {
 	}
 }
 
-// clientIP extracts the real client IP, respecting X-Forwarded-For when
-// running behind a reverse proxy. Note: X-Forwarded-For can be spoofed if the
-// app is directly internet-facing without a trusted proxy stripping the header.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.Index(xff, ","); i != -1 {
-			return strings.TrimSpace(xff[:i])
+// clientIP extracts the client IP for rate limiting. X-Forwarded-For is only
+// honored when trustProxy is enabled, and then only the last entry is used:
+// a trusted proxy appends the real client IP after any client-supplied value,
+// so the last entry is the one the proxy added. Honoring the first entry — or
+// any XFF value when not behind a proxy — would let an attacker mint a fresh
+// rate-limit bucket per request with a spoofed header.
+func clientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				return last
+			}
 		}
-		return strings.TrimSpace(xff)
 	}
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -554,7 +569,7 @@ func (h *handler) requestLogger(next http.Handler) http.Handler {
 			"path", r.URL.Path,
 			"status", rw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
-			"ip", clientIP(r),
+			"ip", clientIP(r, h.trustProxy),
 		)
 	})
 }
@@ -582,6 +597,30 @@ func (h *handler) securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// csrfGuard rejects cross-origin state-changing requests. Browsers attach
+// cached Basic Auth credentials to every request targeting the origin, so a
+// malicious page could otherwise trigger lock/mount/delete side effects via a
+// cross-site form POST even though it cannot read the response. Browsers
+// always send an Origin header on cross-origin requests; non-browser clients
+// (curl, scripts, orchestrators) send none and pass through unaffected.
+func (h *handler) csrfGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if origin := r.Header.Get("Origin"); origin != "" {
+				if u, err := url.Parse(origin); err != nil || u.Host != r.Host {
+					jsonErr(w, "cross-origin requests are not allowed", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// vaultIsUnlocked is a package-level indirection over vault.IsUnlocked so
+// tests can simulate an unlocked vault without a real /dev/mapper entry.
+var vaultIsUnlocked = vault.IsUnlocked
 
 func (h *handler) basicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -53,15 +53,19 @@ func TestClientIP(t *testing.T) {
 		name       string
 		remoteAddr string
 		xff        string
+		trustProxy bool
 		want       string
 	}{
-		{"direct connection", "1.2.3.4:5678", "", "1.2.3.4"},
-		{"single XFF entry", "proxy:9999", "10.0.0.1", "10.0.0.1"},
-		{"XFF with surrounding spaces", "proxy:9999", "  10.0.0.1  ", "10.0.0.1"},
-		{"XFF chain takes first entry", "proxy:9999", "10.0.0.1, 10.0.0.2, 10.0.0.3", "10.0.0.1"},
-		{"XFF chain with spaces", "proxy:9999", " 10.0.0.1 , 10.0.0.2", "10.0.0.1"},
-		{"IPv6 remote addr", "[::1]:8080", "", "::1"},
-		{"unparseable remote addr falls back", "badaddr", "", "badaddr"},
+		{"direct connection", "1.2.3.4:5678", "", false, "1.2.3.4"},
+		{"direct connection with trust", "1.2.3.4:5678", "", true, "1.2.3.4"},
+		{"XFF ignored when proxy not trusted", "5.5.5.5:9999", "10.0.0.1", false, "5.5.5.5"},
+		{"single XFF entry", "proxy:9999", "10.0.0.1", true, "10.0.0.1"},
+		{"XFF with surrounding spaces", "proxy:9999", "  10.0.0.1  ", true, "10.0.0.1"},
+		{"XFF chain takes last entry", "proxy:9999", "10.0.0.1, 10.0.0.2, 10.0.0.3", true, "10.0.0.3"},
+		{"spoofed client-supplied entry ignored", "proxy:9999", "6.6.6.6, 10.0.0.1", true, "10.0.0.1"},
+		{"blank XFF falls back to RemoteAddr", "proxy:9999", "   ", true, "proxy"},
+		{"IPv6 remote addr", "[::1]:8080", "", false, "::1"},
+		{"unparseable remote addr falls back", "badaddr", "", false, "badaddr"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -70,7 +74,7 @@ func TestClientIP(t *testing.T) {
 			if tt.xff != "" {
 				r.Header.Set("X-Forwarded-For", tt.xff)
 			}
-			if got := clientIP(r); got != tt.want {
+			if got := clientIP(r, tt.trustProxy); got != tt.want {
 				t.Errorf("clientIP() = %q, want %q", got, tt.want)
 			}
 		})

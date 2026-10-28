@@ -66,6 +66,8 @@ services:
       DB_PATH: /data/lukscrypt.db
       VAULT_STORAGE_DIRS: /vaults
       VAULT_MOUNT_DIRS: /mnt
+      # TRUST_PROXY: "true"      # set when behind a reverse proxy (rate limiting
+      #                           # then uses X-Forwarded-For)
       # AUTH_USER: admin          # default: admin
       # AUTH_PASSWORD: changeme   # default: random, printed once in container logs
     privileged: true
@@ -89,6 +91,10 @@ For local testing only, the UI is reachable at `http://<nas-ip>:8080`.
 **HTTP Basic Auth sends credentials as base64-encoded plaintext.** Without TLS anyone on
 the same network can read the username and password from a single HTTP request. A
 TLS-terminating reverse proxy is required for any non-localhost deployment.
+
+When running behind a reverse proxy, set `TRUST_PROXY: "true"` so the unlock rate limiter
+sees real client IPs (via `X-Forwarded-For`) instead of lumping all clients into the
+proxy's single rate-limit bucket.
 
 #### Caddy (recommended — automatic TLS)
 
@@ -197,6 +203,7 @@ All configuration is via environment variables.
 | `AUTH_USER` | `admin` | HTTP Basic Auth username |
 | `AUTH_PASSWORD` | *(generated)* | HTTP Basic Auth password. If unset, a random 32-character hex password is generated at startup and printed to the container logs. Set this to a stable value in production. |
 | `VAULT_MAX_SIZE_GB` | `100` | Maximum size in GB that a vault may be created with. Must be a positive integer. |
+| `TRUST_PROXY` | `false` | Set to `true` only when running behind a trusted reverse proxy. Enables `X-Forwarded-For` for per-client rate limiting (only the last, proxy-appended entry is used). Leave `false` when the app is reachable directly — otherwise clients could spoof the header to bypass rate limiting. |
 
 ### Multiple storage / mount locations
 
@@ -261,7 +268,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault |
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
-| `DELETE` | `/api/vaults/{id}` | Yes | Deletes a locked vault (image file + mount directory) |
+| `DELETE` | `/api/vaults/{id}` | Yes | Deletes a locked vault (image file + mount directory); returns `422` if the vault is still unlocked |
 
 ### Create vault request body
 
@@ -311,7 +318,13 @@ When `fallocate` is unavailable the `creating` step emits incremental progress e
   arbitrary paths — any path not in `VAULT_STORAGE_DIRS` / `VAULT_MOUNT_DIRS` is rejected
   with `400 Bad Request`.
 - **Unlock attempts are rate-limited** per client IP: burst of 5 attempts, then one attempt
-  per 30 seconds. This limits brute-force password guessing.
+  per 30 seconds. This limits brute-force password guessing. `X-Forwarded-For` is only
+  honored when `TRUST_PROXY=true` is set (and only the last, proxy-appended entry is
+  trusted), so the limit cannot be bypassed with a spoofed header.
+- **Cross-origin requests are rejected.** State-changing endpoints (POST/DELETE) check the
+  browser-sent `Origin` header and refuse cross-site requests, so a malicious web page
+  cannot trigger lock/mount/delete actions with the browser's cached Basic Auth
+  credentials. Non-browser clients (curl, scripts) send no `Origin` and are unaffected.
 
 ## Development
 

@@ -1,6 +1,6 @@
 services:
   lukscrypt:
-    image: registry.rimba-net.com/lukscrypt:latest
+    image: ghcr.io/mcrepeau/lukscrypt:latest
     container_name: lukscrypt
     ports:
       - "8080:8080"
@@ -22,6 +22,8 @@ services:
       VAULT_MOUNT_DIRS: /mnt
       # AUTH_USER: admin          # default: admin
       # AUTH_PASSWORD: changeme   # default: random, printed once in container logs
+      # TRUST_PROXY: "true"       # set when running behind a TLS reverse proxy so
+      #                           # unlock rate limiting uses X-Forwarded-For
     privileged: true
     restart: unless-stopped
 

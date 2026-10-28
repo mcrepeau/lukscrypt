@@ -54,6 +54,10 @@ func main() {
 		slog.Warn("AUTH_PASSWORD not set — generated password", "user", authUser, "password", authPass)
 	}
 
+	// TRUST_PROXY must be enabled explicitly: honoring X-Forwarded-For by
+	// default would let clients spoof their IP to the unlock rate limiter.
+	trustProxy := parseBool(os.Getenv("TRUST_PROXY"), false)
+
 	database, err := db.Open(dbPath)
 	if err != nil {
 		slog.Error("failed to open database", "err", err)
@@ -66,6 +70,7 @@ func main() {
 		"storage_dirs", storageDirs,
 		"mount_dirs", mountDirs,
 		"max_vault_size_gb", maxSizeGB,
+		"trust_proxy", trustProxy,
 	)
 
 	// serverCtx is cancelled on shutdown to stop background goroutines and
@@ -76,7 +81,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, version),
+		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, trustProxy, version),
 	}
 
 	go func() {
@@ -119,6 +124,20 @@ func parseMaxSize(env string, defaultVal int) int {
 		os.Exit(1)
 	}
 	return n
+}
+
+// parseBool parses an optional boolean env var, falling back to defaultVal.
+// Exits the process if the value is present but not a valid boolean.
+func parseBool(env string, defaultVal bool) bool {
+	if env == "" {
+		return defaultVal
+	}
+	b, err := strconv.ParseBool(env)
+	if err != nil {
+		slog.Error("environment variable must be a boolean (true/false/1/0)", "value", env)
+		os.Exit(1)
+	}
+	return b
 }
 
 // parseList splits a comma-separated env var and falls back to defaultVal if empty.

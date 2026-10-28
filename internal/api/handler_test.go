@@ -28,7 +28,7 @@ func newTestMux(t *testing.T) (http.Handler, *db.DB) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	h := NewMux(context.Background(), database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100, "test")
+	h := NewMux(context.Background(), database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100, false, "test")
 	return h, database
 }
 
@@ -377,6 +377,107 @@ func TestDeleteVaultSuccess(t *testing.T) {
 	_, err = database.GetVault(v.ID)
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("vault record still present after delete; GetVault err = %v", err)
+	}
+}
+
+// TestDeleteVaultUnlocked verifies that deleting an unlocked vault is refused
+// BEFORE the DB record is removed. The old behavior deleted the record first,
+// making the vault vanish from the UI while its image and mounted filesystem
+// stayed live on disk.
+func TestDeleteVaultUnlocked(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+
+	orig := vaultIsUnlocked
+	vaultIsUnlocked = func(*db.Vault) bool { return true } // simulate an unlocked vault
+	t.Cleanup(func() { vaultIsUnlocked = orig })
+
+	w := auth(h, http.MethodDelete, fmt.Sprintf("/api/vaults/%d", v.ID), nil)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422", w.Code)
+	}
+	if _, err := database.GetVault(v.ID); err != nil {
+		t.Errorf("DB record was removed despite refused delete: %v", err)
+	}
+}
+
+// --- CSRF protection ----------------------------------------------------------
+
+// TestCSRFCrossOriginBlocked checks that state-changing requests carrying a
+// mismatched Origin header are rejected. A malicious page can attach the
+// browser's cached Basic Auth credentials to a cross-site form POST, so
+// lock/mount/delete must not be reachable cross-origin.
+func TestCSRFCrossOriginBlocked(t *testing.T) {
+	h, _ := newTestMux(t)
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		origin string
+	}{
+		{"cross-origin POST", http.MethodPost, "/api/vaults/1/lock", "https://evil.example"},
+		{"cross-origin DELETE", http.MethodDelete, "/api/vaults/1", "https://evil.example"},
+		{"origin null", http.MethodPost, "/api/vaults/1/lock", "null"},
+		{"malformed origin", http.MethodPost, "/api/vaults/1/lock", "://"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.RemoteAddr = "127.0.0.1:9999"
+			req.SetBasicAuth("admin", "testpass")
+			req.Header.Set("Origin", tt.origin)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusForbidden {
+				t.Errorf("got %d, want 403", w.Code)
+			}
+		})
+	}
+}
+
+// TestCSRFSameOriginAllowed checks that a matching Origin passes through to
+// the handler (404 because the vault does not exist, not 403).
+func TestCSRFSameOriginAllowed(t *testing.T) {
+	h, _ := newTestMux(t)
+	req := httptest.NewRequest(http.MethodPost, "http://nas.local:8080/api/vaults/99999/lock", nil)
+	req.RemoteAddr = "127.0.0.1:9999"
+	req.SetBasicAuth("admin", "testpass")
+	req.Header.Set("Origin", "http://nas.local:8080")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404 (same-origin request must pass through)", w.Code)
+	}
+}
+
+// TestCSRFNoOriginAllowed checks that requests without an Origin header
+// (curl, scripts, orchestrators) are unaffected by the CSRF guard.
+func TestCSRFNoOriginAllowed(t *testing.T) {
+	h, _ := newTestMux(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/vaults/99999/lock", nil)
+	req.RemoteAddr = "127.0.0.1:9999"
+	req.SetBasicAuth("admin", "testpass")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404 (no-Origin request must pass through)", w.Code)
+	}
+}
+
+// Cross-origin GETs are read-only and must pass the CSRF guard.
+func TestCSRFCrossOriginGetAllowed(t *testing.T) {
+	h, _ := newTestMux(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/vaults", nil)
+	req.RemoteAddr = "127.0.0.1:9999"
+	req.SetBasicAuth("admin", "testpass")
+	req.Header.Set("Origin", "https://evil.example")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("got %d, want 200", w.Code)
 	}
 }
 
