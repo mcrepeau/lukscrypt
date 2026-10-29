@@ -127,6 +127,11 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	mux.HandleFunc("POST /api/vaults/{id}/unlock", h.unlockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/lock", h.lockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/mount", h.mountVault)
+	// Keyslot management — mutates the LUKS header, so handlers take opMu.
+	// The existing passphrase required by both is the same brute-force
+	// surface as unlock, hence the same rate limiting.
+	mux.HandleFunc("POST /api/vaults/{id}/keyslot/add", h.keyslotAdd)
+	mux.HandleFunc("POST /api/vaults/{id}/keyslot/remove", h.keyslotRemove)
 	// LUKS header details — read-only, no opMu needed (never touches device-mapper).
 	// The literal "details" segment comes before {id} because any pattern of the
 	// form {id}/<literal> would ambiguously overlap the events/{jobID} route
@@ -395,6 +400,118 @@ func (h *handler) mountVault(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, toResponse(*v, vault.ReadMounts()))
 }
 
+// keyslotAdd adds a passphrase keyslot. The existing passphrase must match a
+// valid slot; the vault's data area is untouched. On success the re-read
+// header details are returned so the UI can update its keyslot table in one
+// round trip.
+func (h *handler) keyslotAdd(w http.ResponseWriter, r *http.Request) {
+	if !h.unlockAllowed(r) {
+		jsonErr(w, "too many attempts — wait before trying again", http.StatusTooManyRequests)
+		return
+	}
+	id, err := parseID(r)
+	if err != nil {
+		jsonErr(w, "invalid vault id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		ExistingPassword string `json:"existing_password"`
+		NewPassword      string `json:"new_password"`
+		// KeySlot is optional: nil (or absent) lets cryptsetup pick the first
+		// free slot. A pointer distinguishes an explicit slot 0 from absent.
+		KeySlot *int `json:"key_slot"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.ExistingPassword == "" || req.NewPassword == "" {
+		jsonErr(w, "existing_password and new_password are required", http.StatusBadRequest)
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		jsonErr(w, "new_password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	slot := -1
+	if req.KeySlot != nil {
+		if *req.KeySlot < 0 || *req.KeySlot > vault.MaxKeySlot {
+			jsonErr(w, fmt.Sprintf("key_slot must be between 0 and %d", vault.MaxKeySlot), http.StatusBadRequest)
+			return
+		}
+		slot = *req.KeySlot
+	}
+	v, ok := h.lookupVault(w, id)
+	if !ok {
+		return
+	}
+	h.opMu.Lock()
+	defer h.opMu.Unlock()
+	if err := vaultAddKey(v, req.ExistingPassword, req.NewPassword, slot); err != nil {
+		// The usual failure is a wrong existing passphrase.
+		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	d, err := vaultDumpDetails(v)
+	if err != nil {
+		// The slot was added but the header could not be re-read. Tell the
+		// caller the mutation succeeded rather than reporting a plain error.
+		slog.Warn("keyslot added but header re-read failed", "vault", v.Name, "err", err)
+		jsonErr(w, "keyslot added but failed to re-read header: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, d)
+}
+
+// keyslotRemove removes the keyslot at index key_slot. The password must match
+// a different, still-valid slot; removing the last valid slot is refused both
+// here (409) and by cryptsetup. Returns the re-read header details on success.
+func (h *handler) keyslotRemove(w http.ResponseWriter, r *http.Request) {
+	if !h.unlockAllowed(r) {
+		jsonErr(w, "too many attempts — wait before trying again", http.StatusTooManyRequests)
+		return
+	}
+	id, err := parseID(r)
+	if err != nil {
+		jsonErr(w, "invalid vault id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+		KeySlot  int    `json:"key_slot"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Password == "" || req.KeySlot < 0 || req.KeySlot > vault.MaxKeySlot {
+		jsonErr(w, "password is required and key_slot must be between 0 and 31", http.StatusBadRequest)
+		return
+	}
+	v, ok := h.lookupVault(w, id)
+	if !ok {
+		return
+	}
+	h.opMu.Lock()
+	defer h.opMu.Unlock()
+	d, err := vaultDumpDetails(v)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	if err := vault.ValidateKillSlot(d, req.KeySlot); err != nil {
+		jsonErr(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if err := vaultKillSlot(v, req.Password, req.KeySlot); err != nil {
+		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	d, err = vaultDumpDetails(v)
+	if err != nil {
+		slog.Warn("keyslot removed but header re-read failed", "vault", v.Name, "err", err)
+		jsonErr(w, "keyslot removed but failed to re-read header: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, d)
+}
+
 // vaultDetails returns the vault's LUKS header information (cipher, hash,
 // key size, keyslots, UUID). Only the header is read — no passphrase is
 // required and the vault may be locked or unlocked.
@@ -653,6 +770,13 @@ var vaultIsUnlocked = vault.IsUnlocked
 // vaultDumpDetails is a package-level indirection over vault.DumpDetails so
 // tests can stub the cryptsetup subprocess.
 var vaultDumpDetails = vault.DumpDetails
+
+// vaultAddKey and vaultKillSlot are indirections over vault.AddKey/KillSlot
+// for the same reason.
+var (
+	vaultAddKey   = vault.AddKey
+	vaultKillSlot = vault.KillSlot
+)
 
 func (h *handler) basicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

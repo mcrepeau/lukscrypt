@@ -206,6 +206,18 @@
     padding: 1px 6px;
     margin: 2px 4px 2px 0;
   }
+  .keyslot-chip .keyslot-x {
+    background: none;
+    border: none;
+    color: #a5b4fc;
+    cursor: pointer;
+    font-size: .8rem;
+    line-height: 1;
+    padding: 0 0 0 2px;
+    vertical-align: baseline;
+  }
+  .keyslot-chip .keyslot-x:hover { color: var(--danger); }
+  .btn-tiny { font-size: .68rem; padding: 2px 8px; margin-left: 6px; }
   .vault-details .details-loading { color: var(--text-dim); font-size: .78rem; }
   .vault-details .details-error   { color: var(--danger); font-size: .78rem; }
 
@@ -624,6 +636,70 @@
   </div>
 </div>
 
+<!-- ═══════════════════════════════════════════════
+     ADD KEYSLOT MODAL
+═══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="keyslot-add-modal" onclick="closeOnBackdrop(event,'keyslot-add-modal')">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <span class="modal-title">Add Keyslot</span>
+      <button class="modal-close" onclick="closeModal('keyslot-add-modal')">&times;</button>
+    </div>
+    <p style="font-size:.82rem;color:var(--text-dim);margin-bottom:1rem">
+      Add a new passphrase keyslot to <strong id="keyslot-add-vault-name" style="color:var(--text)"></strong>.
+      The existing vault data is not touched.
+    </p>
+    <div>
+      <div class="form-group">
+        <label class="form-label">Existing password <span>*</span></label>
+        <input type="password" id="ks-existing" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">New password <span>*</span></label>
+        <input type="password" id="ks-new" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Confirm new password <span>*</span></label>
+        <input type="password" id="ks-new2" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('keyslot-add-modal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="keyslot-add-btn" onclick="submitAddKeySlot()">Add keyslot</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     REMOVE KEYSLOT MODAL
+═══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="keyslot-remove-modal" onclick="closeOnBackdrop(event,'keyslot-remove-modal')">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <span class="modal-title" style="color:var(--danger)">Remove Keyslot</span>
+      <button class="modal-close" onclick="closeModal('keyslot-remove-modal')">&times;</button>
+    </div>
+    <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:.5rem">
+      Remove keyslot <strong id="keyslot-remove-slot" style="color:var(--text)"></strong> from
+      <strong id="keyslot-remove-vault-name" style="color:var(--text)"></strong>?
+    </p>
+    <p style="font-size:.78rem;color:var(--danger);margin-bottom:1rem">
+      This permanently destroys that passphrase. Keep a copy of the LUKS header backup before
+      removing keyslots — the vault data cannot be recovered without at least one valid keyslot.
+    </p>
+    <div>
+      <div class="form-group">
+        <label class="form-label">Password of a different keyslot <span>*</span></label>
+        <input type="password" id="ks-remove-pass" onkeydown="if(event.key==='Enter')submitRemoveKeySlot()">
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal('keyslot-remove-modal')">Cancel</button>
+        <button type="button" class="btn btn-danger" id="keyslot-remove-btn" onclick="submitRemoveKeySlot()">Remove keyslot</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Toast container -->
 <div id="toast-container"></div>
 
@@ -636,6 +712,8 @@ let storageDirs = [];
 let mountDirs = [];
 let pendingUnlockId = null;
 let pendingDeleteId = null;
+let pendingKeySlotVaultId = null;
+let pendingKeySlotIndex = null;
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => { loadConfig(); loadVaults(); });
@@ -817,14 +895,18 @@ async function toggleDetails(id) {
       return;
     }
   }
-  wrap.innerHTML = renderDetails(detailsCache.get(id));
+  wrap.innerHTML = renderDetails(detailsCache.get(id), id);
   wrap.dataset.loaded = '1';
 }
 
-function renderDetails(d) {
-  const slots = (d.keyslots || []).map(k =>
-    `<span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)} &middot; ${esc(k.status)}</span>`
-  ).join('') || '<span class="meta-value">none</span>';
+function renderDetails(d, vaultId) {
+  const slots = (d.keyslots || []).map(k => {
+    const removable = k.status === 'valid' || k.status === 'enabled';
+    const chip = `<span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)} &middot; ${esc(k.status)}`;
+    return removable
+      ? `${chip}<button class="keyslot-x" onclick="showRemoveKeySlot(${vaultId}, ${k.index})" title="Remove keyslot ${k.index}">&times;</button></span>`
+      : `${chip}</span>`;
+  }).join('');
 
   return `
     <div class="vault-meta">
@@ -833,8 +915,96 @@ function renderDetails(d) {
       <div class="meta-row"><span class="meta-label">Hash</span><span class="meta-value mono">${esc(d.hash)}</span></div>
       <div class="meta-row"><span class="meta-label">Key</span><span class="meta-value">${d.key_size_bits} bits</span></div>
       <div class="meta-row"><span class="meta-label">UUID</span><span class="meta-value mono">${esc(d.uuid)}</span></div>
-      <div class="meta-row"><span class="meta-label">Keyslots</span><span class="meta-value">${slots}</span></div>
+      <div class="meta-row">
+        <span class="meta-label">Keyslots</span>
+        <span class="meta-value">
+          ${slots || 'none'}
+          <button class="btn btn-ghost btn-tiny" onclick="showAddKeySlot(${vaultId})">+ Add keyslot</button>
+        </span>
+      </div>
     </div>`;
+}
+
+// ── Keyslot management ────────────────────────────────────────────────────────
+// Both operations return the re-read LUKS header from the server; update the
+// cache and re-render the expanded details section in place.
+
+function refreshDetails(vaultId, details) {
+  detailsCache.set(vaultId, details);
+  const wrap = document.getElementById('vault-details-' + vaultId);
+  if (wrap && wrap.style.display === 'block') {
+    wrap.innerHTML = renderDetails(details, vaultId);
+  }
+}
+
+function showAddKeySlot(id) {
+  pendingKeySlotVaultId = id;
+  const v = vaults.find(x => x.id === id);
+  document.getElementById('keyslot-add-vault-name').textContent = v ? v.name : `#${id}`;
+  ['ks-existing', 'ks-new', 'ks-new2'].forEach(x => document.getElementById(x).value = '');
+  const btn = document.getElementById('keyslot-add-btn');
+  btn.disabled = false;
+  btn.textContent = 'Add keyslot';
+  openModal('keyslot-add-modal');
+  setTimeout(() => document.getElementById('ks-existing').focus(), 120);
+}
+
+async function submitAddKeySlot() {
+  const existing = document.getElementById('ks-existing').value;
+  const pass     = document.getElementById('ks-new').value;
+  const pass2    = document.getElementById('ks-new2').value;
+
+  if (pass !== pass2) { toast('New passwords do not match', 'error'); return; }
+  if (pass.length < 8) { toast('New password must be at least 8 characters', 'error'); return; }
+
+  const btn = document.getElementById('keyslot-add-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-inline"></span>Adding…';
+
+  try {
+    const details = await api('POST', `/api/vaults/${pendingKeySlotVaultId}/keyslot/add`,
+      { existing_password: existing, new_password: pass });
+    closeModal('keyslot-add-modal');
+    refreshDetails(pendingKeySlotVaultId, details);
+    toast('Keyslot added.', 'success');
+  } catch (err) {
+    toast('Add keyslot failed: ' + err.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Add keyslot';
+  }
+}
+
+function showRemoveKeySlot(id, slot) {
+  pendingKeySlotVaultId = id;
+  pendingKeySlotIndex = slot;
+  const v = vaults.find(x => x.id === id);
+  document.getElementById('keyslot-remove-slot').textContent = slot;
+  document.getElementById('keyslot-remove-vault-name').textContent = v ? v.name : `#${id}`;
+  document.getElementById('ks-remove-pass').value = '';
+  const btn = document.getElementById('keyslot-remove-btn');
+  btn.disabled = false;
+  btn.textContent = 'Remove keyslot';
+  openModal('keyslot-remove-modal');
+  setTimeout(() => document.getElementById('ks-remove-pass').focus(), 120);
+}
+
+async function submitRemoveKeySlot() {
+  const pass = document.getElementById('ks-remove-pass').value;
+  const btn = document.getElementById('keyslot-remove-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-inline"></span>Removing…';
+
+  try {
+    const details = await api('POST', `/api/vaults/${pendingKeySlotVaultId}/keyslot/remove`,
+      { password: pass, key_slot: pendingKeySlotIndex });
+    closeModal('keyslot-remove-modal');
+    refreshDetails(pendingKeySlotVaultId, details);
+    toast(`Keyslot ${pendingKeySlotIndex} removed.`, 'success');
+  } catch (err) {
+    toast('Remove keyslot failed: ' + err.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Remove keyslot';
+  }
 }
 
 // ── Create vault ──────────────────────────────────────────────────────────────

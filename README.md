@@ -8,6 +8,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 - Create encrypted vault image files backed by LUKS (via `cryptsetup`)
 - Unlock (open + mount) and lock (unmount + close) vaults from the browser
 - View LUKS header details per vault (version, cipher, hash, key size, keyslots, UUID) — lazily loaded, works on locked vaults
+- Manage passphrase keyslots (add/remove) — multiple passphrases per vault without re-encrypting data; the last valid keyslot is protected
 - Real-time creation progress over Server-Sent Events
 - Fast allocation via `fallocate` (near-instantaneous); falls back to `dd` on unsupported filesystems
 - HTTP Basic Auth — a random password is generated on first start if none is configured
@@ -26,7 +27,8 @@ lukscrypt/
 │   ├── api/api.go           # HTTP router and handlers (Go 1.22 stdlib mux)
 │   ├── db/db.go             # SQLite store for vault metadata (modernc.org/sqlite)
 │   ├── vault/vault.go       # LUKS operations: create, unlock, lock, delete
-│   └── vault/luksdump.go    # LUKS header details (luksDump / --dump-json-metadata)
+│   ├── vault/luksdump.go    # LUKS header details (luksDump / --dump-json-metadata)
+│   └── vault/keys.go        # Keyslot management (luksAddKey / luksKillSlot)
 └── web/index.html           # Single-page UI — dark theme, SSE progress, embedded in binary
 ```
 
@@ -270,6 +272,8 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault |
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
+| `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |
+| `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Removes a keyslot by index (returns re-read LUKS details); returns `409` if it is the last valid keyslot |
 | `GET` | `/api/vaults/details/{id}` | Yes | LUKS header details (cipher, hash, key size, keyslots, UUID) — read-only, no passphrase required, works on locked vaults |
 | `DELETE` | `/api/vaults/{id}` | Yes | Deletes a locked vault (image file + mount directory); returns `422` if the vault is still unlocked |
 
@@ -308,6 +312,29 @@ The literal `details` segment comes before `{id}` to avoid a routing-pattern con
 with `/api/vaults/events/{jobID}` (Go's stdlib mux cannot constrain wildcards with
 regexes). If the image file is missing or not a LUKS container, the endpoint returns
 `422` with the `cryptsetup` error message.
+
+### Keyslot management
+
+```json
+POST /api/vaults/{id}/keyslot/add
+{ "existing_password": "...", "new_password": "...", "key_slot": 1 }
+```
+
+`key_slot` is optional (omitted = let cryptsetup pick the first free slot). Both passwords
+go to `cryptsetup luksAddKey` over stdin. Works on locked and unlocked vaults — only the
+LUKS header is modified, never the data area.
+
+```json
+POST /api/vaults/{id}/keyslot/remove
+{ "password": "...", "key_slot": 1 }
+```
+
+The password must match a *different*, still-valid keyslot (that is the proof of
+authority for removing one). Removing the last valid keyslot would make the master
+key — and therefore the vault data — permanently unrecoverable, so it is refused with
+`409` before `cryptsetup luksKillSlot` runs (cryptsetup enforces the same rule as a
+second line of defense). Both endpoints are rate-limited like unlock, since a wrong
+existing password is the same brute-force surface.
 
 ### SSE event format
 
@@ -354,6 +381,11 @@ When `fallocate` is unavailable the `creating` step emits incremental progress e
   `--dump-json-metadata` variant) read only non-secret header fields — cipher parameters,
   keyslot metadata and identifiers — and the endpoint sits behind the same Basic Auth
   as every other API route.
+- **Keyslot management requires an existing passphrase.** Adding a keyslot requires the
+  existing passphrase; removing one requires the passphrase of a different, still-valid
+  keyslot. These credentials are the same proof unlock requires, so the endpoints share
+  unlock's per-IP rate limiter. Passphrases are written to the subprocess's stdin, never
+  to its command line.
 
 ## Development
 

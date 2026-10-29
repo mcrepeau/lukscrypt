@@ -680,3 +680,263 @@ func TestVaultDetailsDumpFailure(t *testing.T) {
 		t.Errorf("got %d, want 422; body: %s", w.Code, w.Body.String())
 	}
 }
+
+// --- POST /api/vaults/{id}/keyslot/add ----------------------------------------
+
+func stubKeyOps(t *testing.T, add func(*db.Vault, string, string, int) error, kill func(*db.Vault, string, int) error, dump func(*db.Vault) (*vault.LUKSDetails, error)) {
+	t.Helper()
+	origAdd, origKill, origDump := vaultAddKey, vaultKillSlot, vaultDumpDetails
+	vaultAddKey, vaultKillSlot, vaultDumpDetails = add, kill, dump
+	t.Cleanup(func() { vaultAddKey, vaultKillSlot, vaultDumpDetails = origAdd, origKill, origDump })
+}
+
+func keyslotAddBody() map[string]any {
+	return map[string]any{
+		"existing_password": "correct horse",
+		"new_password":      "battery staple",
+	}
+}
+
+func TestKeyslotAddValidation(t *testing.T) {
+	h, _ := newTestMux(t)
+	base := keyslotAddBody()
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing existing password", with(base, "existing_password", "")},
+		{"missing new password", with(base, "new_password", "")},
+		{"short new password", with(base, "new_password", "short")},
+		{"negative slot", with(base, "key_slot", -1)},
+		{"slot too high", with(base, "key_slot", 32)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Fresh IP per case: the endpoint rate-limits before validating,
+			// so validation tests would otherwise burn the shared burst.
+			w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/add", "admin", "testpass", "10.1.1.1:1", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestKeyslotAddNotFound(t *testing.T) {
+	h, _ := newTestMux(t)
+	w := auth(h, http.MethodPost, "/api/vaults/99999/keyslot/add", keyslotAddBody())
+	if w.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", w.Code)
+	}
+}
+
+func TestKeyslotAddSuccess(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var gotSlot int
+	stubKeyOps(t,
+		func(_ *db.Vault, _, _ string, slot int) error {
+			gotSlot = slot
+			return nil
+		},
+		nil,
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2", KeySlots: []vault.KeySlot{
+				{Index: 0, Type: "argon2id", Status: "valid"},
+				{Index: 1, Type: "argon2id", Status: "valid"},
+			}}, nil
+		})
+
+	// Explicit slot 0 — a pointer, so 0 must not be treated as "auto".
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/add", v.ID), with(keyslotAddBody(), "key_slot", 0))
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if gotSlot != 0 {
+		t.Errorf("slot passed to vault.AddKey = %d, want 0", gotSlot)
+	}
+	var resp vault.LUKSDetails
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.KeySlots) != 2 {
+		t.Errorf("keyslots = %+v, want 2 slots in response", resp.KeySlots)
+	}
+}
+
+func TestKeyslotAddAutoSlot(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var gotSlot = 42
+	stubKeyOps(t,
+		func(_ *db.Vault, _, _ string, slot int) error {
+			gotSlot = slot
+			return nil
+		},
+		nil,
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2"}, nil
+		})
+	// No key_slot in the body — cryptsetup should pick (slot < 0).
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/add", v.ID), keyslotAddBody())
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if gotSlot != -1 {
+		t.Errorf("slot passed to vault.AddKey = %d, want -1 (auto)", gotSlot)
+	}
+}
+
+func TestKeyslotAddWrongExistingPassword(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	stubKeyOps(t,
+		func(*db.Vault, string, string, int) error {
+			return fmt.Errorf("luksAddKey: No key available with this passphrase")
+		},
+		nil, nil)
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/add", v.ID), keyslotAddBody())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422", w.Code)
+	}
+}
+
+func TestKeyslotAddRateLimit(t *testing.T) {
+	h, _ := newTestMux(t)
+	stubKeyOps(t, func(*db.Vault, string, string, int) error { return nil }, nil, nil)
+	const ip = "10.7.7.7:7777"
+	for i := range 5 {
+		w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/add", "admin", "testpass", ip, keyslotAddBody())
+		// 404 (vault missing) is fine — what matters is that it isn't 429.
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d unexpectedly rate-limited", i+1)
+		}
+	}
+	w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/add", "admin", "testpass", ip, keyslotAddBody())
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("6th request: got %d, want 429", w.Code)
+	}
+}
+
+// --- POST /api/vaults/{id}/keyslot/remove -------------------------------------
+
+func TestKeyslotRemoveValidation(t *testing.T) {
+	h, _ := newTestMux(t)
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing password", map[string]any{"key_slot": 1}},
+		{"negative slot", map[string]any{"password": "correct horse", "key_slot": -1}},
+		{"slot too high", map[string]any{"password": "correct horse", "key_slot": 32}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/remove", "admin", "testpass", "10.2.2.2:2", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestKeyslotRemoveNotFound(t *testing.T) {
+	h, _ := newTestMux(t)
+	w := auth(h, http.MethodPost, "/api/vaults/99999/keyslot/remove", map[string]any{"password": "correct horse", "key_slot": 1})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", w.Code)
+	}
+}
+
+// Killing the last valid keyslot must be refused with 409 BEFORE
+// vault.KillSlot runs — otherwise the master key becomes unreachable.
+func TestKeyslotRemoveLastSlot(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	killCalled := false
+	stubKeyOps(t, nil,
+		func(*db.Vault, string, int) error {
+			killCalled = true
+			return nil
+		},
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2", KeySlots: []vault.KeySlot{
+				{Index: 0, Type: "argon2id", Status: "valid"},
+			}}, nil
+		})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/remove", v.ID), map[string]any{"password": "correct horse", "key_slot": 0})
+	if w.Code != http.StatusConflict {
+		t.Errorf("got %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+	if killCalled {
+		t.Error("vault.KillSlot was invoked despite the last-slot guard")
+	}
+}
+
+func TestKeyslotRemoveSuccess(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var killedSlot = -1
+	stubKeyOps(t, nil,
+		func(_ *db.Vault, _ string, slot int) error {
+			killedSlot = slot
+			return nil
+		},
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2", KeySlots: []vault.KeySlot{
+				{Index: 0, Type: "argon2id", Status: "valid"},
+				{Index: 1, Type: "argon2id", Status: "valid"},
+			}}, nil
+		})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/remove", v.ID), map[string]any{"password": "correct horse", "key_slot": 1})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if killedSlot != 1 {
+		t.Errorf("slot passed to vault.KillSlot = %d, want 1", killedSlot)
+	}
+	var resp vault.LUKSDetails
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.KeySlots) != 2 {
+		t.Errorf("keyslots = %+v, want re-read details in response", resp.KeySlots)
+	}
+}
+
+func TestKeyslotRemoveWrongPassword(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	stubKeyOps(t, nil,
+		func(*db.Vault, string, int) error {
+			return fmt.Errorf("luksKillSlot: No key available with this passphrase")
+		},
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2", KeySlots: []vault.KeySlot{
+				{Index: 0, Type: "argon2id", Status: "valid"},
+				{Index: 1, Type: "argon2id", Status: "valid"},
+			}}, nil
+		})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/remove", v.ID), map[string]any{"password": "wrong", "key_slot": 1})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422", w.Code)
+	}
+}
