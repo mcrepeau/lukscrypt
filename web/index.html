@@ -206,17 +206,13 @@
     padding: 1px 6px;
     margin: 2px 4px 2px 0;
   }
-  .keyslot-chip .keyslot-x {
-    background: none;
-    border: none;
-    color: #a5b4fc;
-    cursor: pointer;
-    font-size: .8rem;
-    line-height: 1;
-    padding: 0 0 0 2px;
-    vertical-align: baseline;
+  .keyslot-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
   }
-  .keyslot-chip .keyslot-x:hover { color: var(--danger); }
+  .keyslot-row .keyslot-chip { margin: 0; }
   .btn-tiny { font-size: .68rem; padding: 2px 8px; margin-left: 6px; }
   .vault-details .details-loading { color: var(--text-dim); font-size: .78rem; }
   .vault-details .details-error   { color: var(--danger); font-size: .78rem; }
@@ -637,6 +633,26 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════
+     MANAGE KEYSLOTS MODAL
+═══════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="keyslot-manage-modal" onclick="closeOnBackdrop(event,'keyslot-manage-modal')">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-header">
+      <span class="modal-title">Manage Keyslots</span>
+      <button class="modal-close" onclick="closeModal('keyslot-manage-modal')">&times;</button>
+    </div>
+    <p style="font-size:.82rem;color:var(--text-dim);margin-bottom:1rem">
+      Passphrase keyslots for <strong id="keyslot-manage-vault-name" style="color:var(--text)"></strong>.
+      Each keyslot holds one passphrase that can unlock the vault.
+    </p>
+    <div id="keyslot-manage-list" style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:1.25rem"></div>
+    <div class="form-actions" style="justify-content:flex-start;margin-bottom:0">
+      <button type="button" class="btn btn-primary" onclick="showAddKeySlot(pendingKeySlotVaultId)">+ Add keyslot</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
      ADD KEYSLOT MODAL
 ═══════════════════════════════════════════════ -->
 <div class="modal-backdrop" id="keyslot-add-modal" onclick="closeOnBackdrop(event,'keyslot-add-modal')">
@@ -900,13 +916,9 @@ async function toggleDetails(id) {
 }
 
 function renderDetails(d, vaultId) {
-  const slots = (d.keyslots || []).map(k => {
-    const removable = k.status === 'valid' || k.status === 'enabled';
-    const chip = `<span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)} &middot; ${esc(k.status)}`;
-    return removable
-      ? `${chip}<button class="keyslot-x" onclick="showRemoveKeySlot(${vaultId}, ${k.index})" title="Remove keyslot ${k.index}">&times;</button></span>`
-      : `${chip}</span>`;
-  }).join('');
+  const slots = (d.keyslots || []).map(k =>
+    `<span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)} &middot; ${esc(k.status)}</span>`
+  ).join('');
 
   return `
     <div class="vault-meta">
@@ -919,15 +931,17 @@ function renderDetails(d, vaultId) {
         <span class="meta-label">Keyslots</span>
         <span class="meta-value">
           ${slots || 'none'}
-          <button class="btn btn-ghost btn-tiny" onclick="showAddKeySlot(${vaultId})">+ Add keyslot</button>
+          <button class="btn btn-ghost btn-tiny" onclick="showManageKeySlots(${vaultId})">Manage keyslots</button>
         </span>
       </div>
     </div>`;
 }
 
 // ── Keyslot management ────────────────────────────────────────────────────────
-// Both operations return the re-read LUKS header from the server; update the
-// cache and re-render the expanded details section in place.
+// The details panel stays informational: a single "Manage keyslots" button
+// opens the manage modal, which lists slots and leads to the add/remove
+// confirm modals. All operations return the re-read LUKS header from the
+// server; update the cache and re-render both views in place.
 
 function refreshDetails(vaultId, details) {
   detailsCache.set(vaultId, details);
@@ -935,6 +949,30 @@ function refreshDetails(vaultId, details) {
   if (wrap && wrap.style.display === 'block') {
     wrap.innerHTML = renderDetails(details, vaultId);
   }
+  if (document.getElementById('keyslot-manage-modal').classList.contains('open')) {
+    renderManageKeySlots(vaultId);
+  }
+}
+
+function showManageKeySlots(id) {
+  pendingKeySlotVaultId = id;
+  const v = vaults.find(x => x.id === id);
+  document.getElementById('keyslot-manage-vault-name').textContent = v ? v.name : `#${id}`;
+  renderManageKeySlots(id);
+  openModal('keyslot-manage-modal');
+}
+
+function renderManageKeySlots(id) {
+  const d = detailsCache.get(id);
+  if (!d) return;
+  const valid = (d.keyslots || []).filter(k => k.status === 'valid' || k.status === 'enabled');
+  const rows = valid.map(k => `
+    <div class="keyslot-row">
+      <span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)}</span>
+      <button class="btn btn-danger btn-tiny" onclick="showRemoveKeySlot(${id}, ${k.index})">Remove</button>
+    </div>`).join('');
+  document.getElementById('keyslot-manage-list').innerHTML =
+    rows || '<span style="color:var(--text-dim);font-size:.78rem">No valid keyslots.</span>';
 }
 
 function showAddKeySlot(id) {
