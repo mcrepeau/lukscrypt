@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -239,12 +241,30 @@ func createFile(ctx context.Context, imgPath string, sizeGB int, ch chan<- Progr
 
 // Unlock opens a LUKS device and mounts it at the vault's configured mount point.
 func Unlock(v *db.Vault, password string) error {
+	return unlockWith(v, strings.NewReader(password))
+}
+
+// UnlockKeyFile opens the LUKS device using raw keyfile bytes as the
+// credential. The bytes are piped to cryptsetup's stdin (--key-file=-) and
+// never touch the filesystem. --keyfile-size pins the exact byte count so
+// binary content (including embedded newlines) is used verbatim and a
+// truncated read fails instead of silently becoming a shorter credential.
+func UnlockKeyFile(v *db.Vault, key []byte) error {
+	return unlockWith(v, bytes.NewReader(key),
+		"--key-file=-", "--keyfile-size="+strconv.Itoa(len(key)))
+}
+
+// unlockWith is the shared unlock path: extraArgs are cryptsetup options
+// inserted before the device path, and stdin carries the credential.
+func unlockWith(v *db.Vault, stdin io.Reader, extraArgs ...string) error {
 	if IsUnlocked(v) {
 		return fmt.Errorf("vault is already unlocked")
 	}
 
-	cmd := exec.Command("cryptsetup", "luksOpen", v.Path, v.MapperName)
-	cmd.Stdin = strings.NewReader(password)
+	args := append([]string{"luksOpen"}, extraArgs...)
+	args = append(args, v.Path, v.MapperName)
+	cmd := exec.Command("cryptsetup", args...)
+	cmd.Stdin = stdin
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("luksOpen: %s", strings.TrimSpace(string(out)))
 	}

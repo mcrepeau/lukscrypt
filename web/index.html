@@ -598,10 +598,18 @@
       Enter the password for <strong id="unlock-vault-name" style="color:var(--text)"></strong>.
     </p>
     <div>
-      <div class="form-group">
+      <div class="form-group" id="unlock-pass-group">
         <label class="form-label">Password <span>*</span></label>
         <input type="password" id="unlock-pass" onkeydown="if(event.key==='Enter')submitUnlock()">
       </div>
+      <div class="form-group" id="unlock-keyfile-group" style="display:none">
+        <label class="form-label">Keyfile <span>*</span></label>
+        <input type="file" id="unlock-keyfile" style="color:var(--text-muted)">
+        <small style="display:block;color:var(--text-dim);font-size:.72rem;margin-top:.3rem">
+          The file's raw bytes are used as the credential — pick the exact same file that was added as a keyslot.
+        </small>
+      </div>
+      <button type="button" class="btn btn-ghost btn-tiny" style="margin:0 0 1rem" id="unlock-mode-toggle" onclick="toggleUnlockKeyfile()">Use a keyfile instead</button>
       <div class="form-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal('unlock-modal')">Cancel</button>
         <button type="button" class="btn btn-primary" id="unlock-btn" onclick="submitUnlock()">Unlock</button>
@@ -666,18 +674,32 @@
       The existing vault data is not touched.
     </p>
     <div>
-      <div class="form-group">
+      <div class="form-group" id="ks-existing-group">
         <label class="form-label">Existing password <span>*</span></label>
         <input type="password" id="ks-existing" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
       </div>
-      <div class="form-group">
+      <div class="form-group" id="ks-existing-keyfile-group" style="display:none">
+        <label class="form-label">Existing keyfile <span>*</span></label>
+        <input type="file" id="ks-existing-keyfile" style="color:var(--text-muted)">
+      </div>
+      <button type="button" class="btn btn-ghost btn-tiny" style="margin:0 0 1rem" id="ks-existing-toggle" onclick="toggleKsExistingKeyfile()">Use a keyfile instead</button>
+      <div class="form-group" id="ks-new-group">
         <label class="form-label">New password <span>*</span></label>
         <input type="password" id="ks-new" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
       </div>
-      <div class="form-group">
+      <div class="form-group" id="ks-new2-group">
         <label class="form-label">Confirm new password <span>*</span></label>
         <input type="password" id="ks-new2" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
       </div>
+      <div class="form-group" id="ks-new-keyfile-group" style="display:none">
+        <label class="form-label">New keyfile <span>*</span></label>
+        <input type="file" id="ks-new-keyfile" style="color:var(--text-muted)">
+        <small style="display:block;color:var(--text-dim);font-size:.72rem;margin-top:.3rem">
+          The file's raw bytes become the new credential — a high-entropy random blob you keep
+          somewhere safe (e.g. a password manager attachment) is ideal.
+        </small>
+      </div>
+      <button type="button" class="btn btn-ghost btn-tiny" style="margin:0 0 1rem" id="ks-new-toggle" onclick="toggleKsNewKeyfile()">Use a keyfile instead</button>
       <div class="form-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal('keyslot-add-modal')">Cancel</button>
         <button type="button" class="btn btn-primary" id="keyslot-add-btn" onclick="submitAddKeySlot()">Add keyslot</button>
@@ -730,6 +752,9 @@ let pendingUnlockId = null;
 let pendingDeleteId = null;
 let pendingKeySlotVaultId = null;
 let pendingKeySlotIndex = null;
+let unlockUsesKeyfile = false;
+let ksExistingUsesKeyfile = false;
+let ksNewUsesKeyfile = false;
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => { loadConfig(); loadVaults(); });
@@ -978,9 +1003,14 @@ function renderManageKeySlots(id) {
 
 function showAddKeySlot(id) {
   pendingKeySlotVaultId = id;
+  ksExistingUsesKeyfile = false;
+  ksNewUsesKeyfile = false;
+  updateKsExistingMode();
+  updateKsNewMode();
   const v = vaults.find(x => x.id === id);
   document.getElementById('keyslot-add-vault-name').textContent = v ? v.name : `#${id}`;
   ['ks-existing', 'ks-new', 'ks-new2'].forEach(x => document.getElementById(x).value = '');
+  ['ks-existing-keyfile', 'ks-new-keyfile'].forEach(x => document.getElementById(x).value = '');
   const btn = document.getElementById('keyslot-add-btn');
   btn.disabled = false;
   btn.textContent = 'Add keyslot';
@@ -988,21 +1018,61 @@ function showAddKeySlot(id) {
   setTimeout(() => document.getElementById('ks-existing').focus(), 120);
 }
 
-async function submitAddKeySlot() {
-  const existing = document.getElementById('ks-existing').value;
-  const pass     = document.getElementById('ks-new').value;
-  const pass2    = document.getElementById('ks-new2').value;
+function toggleKsExistingKeyfile() {
+  ksExistingUsesKeyfile = !ksExistingUsesKeyfile;
+  updateKsExistingMode();
+}
 
-  if (pass !== pass2) { toast('New passwords do not match', 'error'); return; }
-  if (pass.length < 8) { toast('New password must be at least 8 characters', 'error'); return; }
+function updateKsExistingMode() {
+  document.getElementById('ks-existing-group').style.display = ksExistingUsesKeyfile ? 'none' : '';
+  document.getElementById('ks-existing-keyfile-group').style.display = ksExistingUsesKeyfile ? '' : 'none';
+  document.getElementById('ks-existing-toggle').textContent = ksExistingUsesKeyfile ? 'Use a password instead' : 'Use a keyfile instead';
+}
+
+function toggleKsNewKeyfile() {
+  ksNewUsesKeyfile = !ksNewUsesKeyfile;
+  updateKsNewMode();
+}
+
+function updateKsNewMode() {
+  document.getElementById('ks-new-group').style.display = ksNewUsesKeyfile ? 'none' : '';
+  document.getElementById('ks-new2-group').style.display = ksNewUsesKeyfile ? 'none' : '';
+  document.getElementById('ks-new-keyfile-group').style.display = ksNewUsesKeyfile ? '' : 'none';
+  document.getElementById('ks-new-toggle').textContent = ksNewUsesKeyfile ? 'Use a password instead' : 'Use a keyfile instead';
+}
+
+async function submitAddKeySlot() {
+  let body = {};
+  if (ksExistingUsesKeyfile) {
+    const f = selectedKeyfile('ks-existing-keyfile');
+    if (!f) return;
+    try {
+      body.existing_key_file = await fileToBase64(f);
+    } catch (e) { toast(e.message, 'error'); return; }
+  } else {
+    body.existing_password = document.getElementById('ks-existing').value;
+  }
+
+  if (ksNewUsesKeyfile) {
+    const f = selectedKeyfile('ks-new-keyfile');
+    if (!f) return;
+    try {
+      body.new_key_file = await fileToBase64(f);
+    } catch (e) { toast(e.message, 'error'); return; }
+  } else {
+    const pass  = document.getElementById('ks-new').value;
+    const pass2 = document.getElementById('ks-new2').value;
+    if (pass !== pass2) { toast('New passwords do not match', 'error'); return; }
+    if (pass.length < 8) { toast('New password must be at least 8 characters', 'error'); return; }
+    body.new_password = pass;
+  }
 
   const btn = document.getElementById('keyslot-add-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-inline"></span>Adding…';
 
   try {
-    const details = await api('POST', `/api/vaults/${pendingKeySlotVaultId}/keyslot/add`,
-      { existing_password: existing, new_password: pass });
+    const details = await api('POST', `/api/vaults/${pendingKeySlotVaultId}/keyslot/add`, body);
     closeModal('keyslot-add-modal');
     refreshDetails(pendingKeySlotVaultId, details);
     toast('Keyslot added.', 'success');
@@ -1167,25 +1237,80 @@ function markStep(step, state) {
 }
 
 // ── Unlock vault ──────────────────────────────────────────────────────────────
+// Reads a keyfile as base64 for the key_file JSON field. Chunked conversion
+// avoids the call-stack limit of btoa on large binary strings.
+const KEYFILE_MAX_BYTES = 1024 * 1024;
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error('Could not read the selected file'));
+    r.onload = () => {
+      const bytes = new Uint8Array(r.result);
+      let bin = '';
+      const chunk = 8192;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      resolve(btoa(bin));
+    };
+    r.readAsArrayBuffer(file);
+  });
+}
+
+function selectedKeyfile(inputId) {
+  const f = document.getElementById(inputId).files[0];
+  if (!f) { toast('Choose a keyfile first', 'error'); return null; }
+  if (f.size > KEYFILE_MAX_BYTES) { toast('Keyfile exceeds the 1 MiB limit', 'error'); return null; }
+  return f;
+}
+
 function showUnlock(id) {
   pendingUnlockId = id;
+  unlockUsesKeyfile = false;
+  updateUnlockMode();
   const v = vaults.find(x => x.id === id);
   document.getElementById('unlock-vault-name').textContent = v ? v.name : `#${id}`;
   document.getElementById('unlock-pass').value = '';
+  document.getElementById('unlock-keyfile').value = '';
   document.getElementById('unlock-btn').disabled = false;
   document.getElementById('unlock-btn').textContent = 'Unlock';
   openModal('unlock-modal');
-  setTimeout(() => document.getElementById('unlock-pass').focus(), 120);
+  setTimeout(() => {
+    (unlockUsesKeyfile ? document.getElementById('unlock-keyfile')
+                       : document.getElementById('unlock-pass')).focus();
+  }, 120);
+}
+
+function toggleUnlockKeyfile() {
+  unlockUsesKeyfile = !unlockUsesKeyfile;
+  updateUnlockMode();
+}
+
+function updateUnlockMode() {
+  document.getElementById('unlock-pass-group').style.display = unlockUsesKeyfile ? 'none' : '';
+  document.getElementById('unlock-keyfile-group').style.display = unlockUsesKeyfile ? '' : 'none';
+  document.getElementById('unlock-mode-toggle').textContent = unlockUsesKeyfile ? 'Use a password instead' : 'Use a keyfile instead';
 }
 
 async function submitUnlock() {
-  const pass = document.getElementById('unlock-pass').value;
+  let body;
+  if (unlockUsesKeyfile) {
+    const f = selectedKeyfile('unlock-keyfile');
+    if (!f) return;
+    try {
+      body = { key_file: await fileToBase64(f) };
+    } catch (e) { toast(e.message, 'error'); return; }
+  } else {
+    body = { password: document.getElementById('unlock-pass').value };
+  }
+
   const btn  = document.getElementById('unlock-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-inline"></span>Unlocking…';
 
   try {
-    const updated = await api('POST', `/api/vaults/${pendingUnlockId}/unlock`, { password: pass });
+    const updated = await api('POST', `/api/vaults/${pendingUnlockId}/unlock`, body);
     // Apply the server's response to only this vault; other vaults are untouched.
     const idx = vaults.findIndex(x => x.id === pendingUnlockId);
     if (idx !== -1) vaults[idx] = updated;

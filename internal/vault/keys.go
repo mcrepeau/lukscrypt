@@ -1,7 +1,9 @@
 package vault
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -28,6 +30,54 @@ func AddKey(v *db.Vault, oldPassword, newPassword string, slot int) error {
 	// --batch-mode suppresses the retype prompt; stdin then carries the
 	// existing passphrase followed by the new one.
 	cmd.Stdin = strings.NewReader(oldPassword + "\n" + newPassword + "\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("luksAddKey: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// MaxKeyFileSize caps uploaded keyfiles (base64-decoded). A good keyfile is a
+// few dozen bytes; 1 MiB is a generous ceiling that keeps request bodies
+// small (cryptsetup's own default maximum is 8 MiB).
+const MaxKeyFileSize = 1024 * 1024
+
+// MinKeyFileSize mirrors the 8-character password policy: the keyfile content
+// is the credential itself, so a shorter file would be strictly weaker than
+// the weakest password the API accepts.
+const MinKeyFileSize = 8
+
+// AddKeyFile adds a keyslot whose new credential is raw keyfile bytes.
+// existing may be either a typed passphrase or keyfile bytes — both are fed
+// via stdin as the existing-key keyfile (--key-file=-, exact --keyfile-size).
+// cryptsetup has no two-input stdin mode, so the new credential must be a
+// file for its positional argument: it goes through a 0600 temp file that is
+// removed immediately after the command exits.
+func AddKeyFile(v *db.Vault, existing, newKey []byte, slot int) error {
+	tmp, err := os.CreateTemp("", "lukscrypt-key-")
+	if err != nil {
+		return fmt.Errorf("create temp key file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("secure temp key file: %w", err)
+	}
+	if _, err := tmp.Write(newKey); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp key file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write temp key file: %w", err)
+	}
+
+	args := []string{"luksAddKey", "--batch-mode", "--key-file=-", "--keyfile-size=" + strconv.Itoa(len(existing))}
+	if slot >= 0 {
+		args = append(args, "--key-slot", strconv.Itoa(slot))
+	}
+	args = append(args, v.Path, tmpPath)
+	cmd := exec.Command("cryptsetup", args...)
+	cmd.Stdin = bytes.NewReader(existing)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("luksAddKey: %s", strings.TrimSpace(string(out)))
 	}

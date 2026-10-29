@@ -9,6 +9,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 - Unlock (open + mount) and lock (unmount + close) vaults from the browser
 - View LUKS header details per vault (version, cipher, hash, key size, keyslots, UUID) — lazily loaded, works on locked vaults
 - Manage passphrase keyslots (add/remove) — multiple passphrases per vault without re-encrypting data; the last valid keyslot is protected
+- Unlock with a password or a keyfile, and add keyfile-based keyslots (e.g. a random blob kept in a password manager as a break-glass credential)
 - Real-time creation progress over Server-Sent Events
 - Fast allocation via `fallocate` (near-instantaneous); falls back to `dd` on unsupported filesystems
 - HTTP Basic Auth — a random password is generated on first start if none is configured
@@ -269,7 +270,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `GET` | `/api/vaults` | Yes | Lists all vaults with live mounted/unlocked status |
 | `POST` | `/api/vaults` | Yes | Creates a new vault (returns `202` with `job_id`) |
 | `GET` | `/api/vaults/events/{job_id}` | Yes | SSE stream for vault creation progress |
-| `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault |
+| `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault with `password` or base64 `key_file` |
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
 | `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |
@@ -320,9 +321,16 @@ POST /api/vaults/{id}/keyslot/add
 { "existing_password": "...", "new_password": "...", "key_slot": 1 }
 ```
 
-`key_slot` is optional (omitted = let cryptsetup pick the first free slot). Both passwords
-go to `cryptsetup luksAddKey` over stdin. Works on locked and unlocked vaults — only the
-LUKS header is modified, never the data area.
+`key_slot` is optional (omitted = let cryptsetup pick the first free slot). Exactly one
+existing credential (`existing_password` or base64 `existing_key_file`) and exactly one
+new credential (`new_password` or base64 `new_key_file`) must be provided. Keyfile
+uploads must decode to 8 bytes – 1 MiB; a keyfile is the credential itself, so the
+minimum mirrors the 8-character password policy. When only passwords are involved the
+credentials go to `cryptsetup luksAddKey` over stdin; when a keyfile is involved, the
+existing credential is piped via stdin (`--key-file=-` with an exact `--keyfile-size`)
+and the new credential goes through a `0600` temp file that is removed immediately
+after — cryptsetup has no two-input stdin mode. Works on locked and unlocked vaults:
+only the LUKS header is modified, never the data area.
 
 ```json
 POST /api/vaults/{id}/keyslot/remove
@@ -386,6 +394,13 @@ When `fallocate` is unavailable the `creating` step emits incremental progress e
   keyslot. These credentials are the same proof unlock requires, so the endpoints share
   unlock's per-IP rate limiter. Passphrases are written to the subprocess's stdin, never
   to its command line.
+- **Keyfiles are never written to persistent storage.** Keyfile bytes uploaded as base64
+  are piped to `cryptsetup` via stdin (`--key-file=-` with an exact `--keyfile-size`, so
+  binary content is used verbatim and truncated reads fail instead of becoming a weaker
+  credential). The one exception is `keyslot/add` with a new keyfile, where cryptsetup's
+  two-input limitation requires a `0600` temp file that is deleted immediately after
+  the command exits. Like passphrases, keyfiles are only as safe as the transport —
+  use TLS.
 
 ## Development
 

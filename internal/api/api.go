@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -340,12 +341,24 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Password string `json:"password"`
+		KeyFile  string `json:"key_file"` // base64-encoded keyfile bytes
 	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Password == "" {
-		jsonErr(w, "password is required", http.StatusBadRequest)
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if len(req.Password) < 8 {
+	// Exactly one of password / key_file must be provided.
+	if (req.Password == "") == (req.KeyFile == "") {
+		jsonErr(w, "provide either password or key_file (not both)", http.StatusBadRequest)
+		return
+	}
+	var key []byte
+	if req.KeyFile != "" {
+		if key, err = decodeKeyFile(req.KeyFile); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if len(req.Password) < 8 {
 		jsonErr(w, "password must be at least 8 characters", http.StatusBadRequest)
 		return
 	}
@@ -355,7 +368,12 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 	}
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
-	if err := vault.Unlock(v, req.Password); err != nil {
+	if req.KeyFile != "" {
+		if err := vaultUnlockKeyFile(v, key); err != nil {
+			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+	} else if err := vaultUnlock(v, req.Password); err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
@@ -416,7 +434,9 @@ func (h *handler) keyslotAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		ExistingPassword string `json:"existing_password"`
+		ExistingKeyFile  string `json:"existing_key_file"` // base64-encoded
 		NewPassword      string `json:"new_password"`
+		NewKeyFile       string `json:"new_key_file"` // base64-encoded
 		// KeySlot is optional: nil (or absent) lets cryptsetup pick the first
 		// free slot. A pointer distinguishes an explicit slot 0 from absent.
 		KeySlot *int `json:"key_slot"`
@@ -425,13 +445,34 @@ func (h *handler) keyslotAdd(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.ExistingPassword == "" || req.NewPassword == "" {
-		jsonErr(w, "existing_password and new_password are required", http.StatusBadRequest)
+	// Exactly one credential of each kind: existing (password or keyfile)
+	// proves authority; new (password or keyfile) becomes the slot's content.
+	if (req.ExistingPassword == "") == (req.ExistingKeyFile == "") {
+		jsonErr(w, "provide either existing_password or existing_key_file (not both)", http.StatusBadRequest)
 		return
 	}
-	if len(req.NewPassword) < 8 {
+	if (req.NewPassword == "") == (req.NewKeyFile == "") {
+		jsonErr(w, "provide either new_password or new_key_file (not both)", http.StatusBadRequest)
+		return
+	}
+	if req.NewPassword != "" && len(req.NewPassword) < 8 {
 		jsonErr(w, "new_password must be at least 8 characters", http.StatusBadRequest)
 		return
+	}
+	// Decode keyfile uploads up front so malformed input is rejected before
+	// any vault lookup or lock acquisition.
+	var existingCred, newCred []byte
+	if req.NewKeyFile != "" {
+		if newCred, err = decodeKeyFile(req.NewKeyFile); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.ExistingKeyFile != "" {
+		if existingCred, err = decodeKeyFile(req.ExistingKeyFile); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	slot := -1
 	if req.KeySlot != nil {
@@ -447,10 +488,25 @@ func (h *handler) keyslotAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
-	if err := vaultAddKey(v, req.ExistingPassword, req.NewPassword, slot); err != nil {
-		// The usual failure is a wrong existing passphrase.
-		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
-		return
+
+	// Pure-password keeps the validated single-stdin luksAddKey path; any
+	// keyfile credential goes through the temp-file variant.
+	if req.NewKeyFile == "" && req.ExistingKeyFile == "" {
+		if err := vaultAddKey(v, req.ExistingPassword, req.NewPassword, slot); err != nil {
+			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+	} else {
+		if existingCred == nil {
+			existingCred = []byte(req.ExistingPassword)
+		}
+		if newCred == nil {
+			newCred = []byte(req.NewPassword)
+		}
+		if err := vaultAddKeyFile(v, existingCred, newCred, slot); err != nil {
+			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 	}
 	d, err := vaultDumpDetails(v)
 	if err != nil {
@@ -777,6 +833,29 @@ var (
 	vaultAddKey   = vault.AddKey
 	vaultKillSlot = vault.KillSlot
 )
+
+// vaultUnlock, vaultUnlockKeyFile and vaultAddKeyFile follow the same pattern.
+var (
+	vaultUnlock        = vault.Unlock
+	vaultUnlockKeyFile = vault.UnlockKeyFile
+	vaultAddKeyFile    = vault.AddKeyFile
+)
+
+// decodeKeyFile decodes and validates a base64 keyfile upload: 8 bytes to
+// 1 MiB, mirroring the password policy (the content IS the credential).
+func decodeKeyFile(b64 string) ([]byte, error) {
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("key_file is not valid base64")
+	}
+	if len(data) < vault.MinKeyFileSize {
+		return nil, fmt.Errorf("key_file must be at least %d bytes", vault.MinKeyFileSize)
+	}
+	if len(data) > vault.MaxKeyFileSize {
+		return nil, fmt.Errorf("key_file exceeds maximum size of %d bytes", vault.MaxKeyFileSize)
+	}
+	return data, nil
+}
 
 func (h *handler) basicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

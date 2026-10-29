@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -824,6 +825,146 @@ func TestKeyslotAddRateLimit(t *testing.T) {
 	w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/add", "admin", "testpass", ip, keyslotAddBody())
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("6th request: got %d, want 429", w.Code)
+	}
+}
+
+// --- POST /api/vaults/{id}/unlock and /keyslot/add with keyfiles ----------------
+
+// b64 returns the base64 of s, for keyfile bodies.
+func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+func stubKeyfileOps(t *testing.T, unlockKey func(*db.Vault, []byte) error, addKeyFile func(*db.Vault, []byte, []byte, int) error) {
+	t.Helper()
+	origUnlock, origAdd := vaultUnlockKeyFile, vaultAddKeyFile
+	vaultUnlockKeyFile, vaultAddKeyFile = unlockKey, addKeyFile
+	t.Cleanup(func() { vaultUnlockKeyFile, vaultAddKeyFile = origUnlock, origAdd })
+}
+
+func TestUnlockWithKeyFile(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var gotKey []byte
+	stubKeyfileOps(t,
+		func(_ *db.Vault, key []byte) error {
+			gotKey = key
+			return nil
+		},
+		nil)
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/unlock", v.ID),
+		map[string]string{"key_file": b64("a-file-keyfile-0123456789")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if string(gotKey) != "a-file-keyfile-0123456789" {
+		t.Errorf("key passed to vault.UnlockKeyFile = %q", gotKey)
+	}
+}
+
+func TestUnlockKeyFileValidation(t *testing.T) {
+	h, _ := newTestMux(t)
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{"neither password nor key_file", map[string]any{}},
+		{"both password and key_file", map[string]any{"password": "strongpassword", "key_file": b64("12345678")}},
+		{"invalid base64", map[string]any{"key_file": "!!!not-base64!!!"}},
+		{"keyfile too short", map[string]any{"key_file": b64("1234")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := request(h, http.MethodPost, "/api/vaults/99999/unlock", "admin", "testpass", "10.3.3.3:3", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestKeyslotAddWithNewKeyFile(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var gotExisting, gotNew []byte
+	stubKeyOps(t, nil, nil,
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2"}, nil
+		})
+	stubKeyfileOps(t, nil,
+		func(_ *db.Vault, existing, newKey []byte, _ int) error {
+			gotExisting, gotNew = existing, newKey
+			return nil
+		})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/add", v.ID), map[string]any{
+		"existing_password": "correct horse",
+		"new_key_file":      b64("random-keyfile-bytes-0123456789"),
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if string(gotExisting) != "correct horse" {
+		t.Errorf("existing credential = %q, want the typed password", gotExisting)
+	}
+	if string(gotNew) != "random-keyfile-bytes-0123456789" {
+		t.Errorf("new credential = %q, want the decoded keyfile", gotNew)
+	}
+}
+
+func TestKeyslotAddWithExistingKeyFile(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var gotExisting []byte
+	stubKeyOps(t, nil, nil,
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2"}, nil
+		})
+	stubKeyfileOps(t, nil,
+		func(_ *db.Vault, existing, _ []byte, _ int) error {
+			gotExisting = existing
+			return nil
+		})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/add", v.ID), map[string]any{
+		"existing_key_file": b64("existing-slot-keyfile-01234567"),
+		"new_password":      "battery staple",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if string(gotExisting) != "existing-slot-keyfile-01234567" {
+		t.Errorf("existing credential = %q, want the decoded keyfile", gotExisting)
+	}
+}
+
+func TestKeyslotAddKeyFileValidation(t *testing.T) {
+	h, _ := newTestMux(t)
+	base := map[string]any{
+		"existing_password": "correct horse",
+		"new_password":      "battery staple",
+	}
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{"both new credentials", with(base, "new_key_file", b64("12345678"))},
+		{"both existing credentials", with(base, "existing_key_file", b64("12345678"))},
+		{"invalid base64 new keyfile", with(with(base, "new_password", ""), "new_key_file", "!!!not-base64!!!")},
+		{"new keyfile too short", with(with(base, "new_password", ""), "new_key_file", b64("1234"))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/add", "admin", "testpass", "10.4.4.4:4", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 
