@@ -116,3 +116,12 @@ func (d *DB) DeleteVault(id int64) error {
 	_, err := d.conn.Exec(`DELETE FROM vaults WHERE id = ?`, id)
 	return err
 }
+
+// UpdateVaultPaths changes the image path and mount point of a vault. Vault
+// name and mapper name are immutable (they define the mount convention and
+// device-mapper name); only where the image lives and where it mounts may
+// be edited, after the operator has moved the image file themselves.
+func (d *DB) UpdateVaultPaths(id int64, path, mountPoint string) error {
+	_, err := d.conn.Exec(`UPDATE vaults SET path = ?, mount_point = ? WHERE id = ?`, path, mountPoint, id)
+	return err
+}

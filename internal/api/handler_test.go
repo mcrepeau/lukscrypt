@@ -682,6 +682,125 @@ func TestVaultDetailsDumpFailure(t *testing.T) {
 	}
 }
 
+// --- PUT /api/vaults/{id} (path editing) ---------------------------------------
+
+func TestUpdateVaultPathsValidation(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	path := fmt.Sprintf("/api/vaults/%d", v.ID)
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{"nothing to update", map[string]any{}},
+		{"path outside storage dirs", map[string]any{"path": "/etc/testvault.img"}},
+		{"path in sibling dir with shared prefix", map[string]any{"path": "/vaults2/testvault.img"}},
+		{"mount dir not allowed", map[string]any{"path": "/vaults/testvault.img", "mount_dir": "/tmp"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := request(h, http.MethodPut, path, "admin", "testpass", "10.8.8.8:8", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestUpdateVaultPathsNotFound(t *testing.T) {
+	h, _ := newTestMux(t)
+	w := auth(h, http.MethodPut, "/api/vaults/99999", map[string]any{"path": "/vaults/x.img"})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", w.Code)
+	}
+}
+
+func TestUpdateVaultPathsUnlocked(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return &vault.LUKSDetails{Version: "2"}, nil
+	})
+	orig := vaultIsUnlocked
+	vaultIsUnlocked = func(*db.Vault) bool { return true }
+	t.Cleanup(func() { vaultIsUnlocked = orig })
+
+	w := auth(h, http.MethodPut, fmt.Sprintf("/api/vaults/%d", v.ID), map[string]any{"path": "/vaults/moved.img"})
+	if w.Code != http.StatusConflict {
+		t.Errorf("got %d, want 409", w.Code)
+	}
+	got, err := database.GetVault(v.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Path != "/vaults/testvault.img" {
+		t.Errorf("record was updated despite unlocked vault: %+v", got)
+	}
+}
+
+func TestUpdateVaultPathsNotLuks(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return nil, fmt.Errorf("luksDump: Device /vaults/moved.img is not a valid LUKS device")
+	})
+	w := auth(h, http.MethodPut, fmt.Sprintf("/api/vaults/%d", v.ID), map[string]any{"path": "/vaults/moved.img"})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422", w.Code)
+	}
+	got, err := database.GetVault(v.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Path != "/vaults/testvault.img" {
+		t.Errorf("record updated despite invalid image: %+v", got)
+	}
+}
+
+func TestUpdateVaultPathsSuccess(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var probedPath string
+	stubDumpDetails(t, func(vv *db.Vault) (*vault.LUKSDetails, error) {
+		probedPath = vv.Path
+		return &vault.LUKSDetails{Version: "2", UUID: "abc"}, nil
+	})
+	w := auth(h, http.MethodPut, fmt.Sprintf("/api/vaults/%d", v.ID),
+		map[string]any{"path": "/vaults/moved.img", "mount_dir": "/mnt"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if probedPath != "/vaults/moved.img" {
+		t.Errorf("dump probed %q, want the new path", probedPath)
+	}
+	var resp vaultResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Path != "/vaults/moved.img" || resp.MountPoint != "/mnt/testvault" {
+		t.Errorf("response = %+v, want updated paths", resp)
+	}
+	got, err := database.GetVault(v.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Path != "/vaults/moved.img" || got.Name != "testvault" {
+		t.Errorf("db record = %+v", got)
+	}
+}
+
 // --- POST /api/vaults/{id}/keyslot/add ----------------------------------------
 
 func stubKeyOps(t *testing.T, add func(*db.Vault, string, string, int) error, kill func(*db.Vault, string, int) error, dump func(*db.Vault) (*vault.LUKSDetails, error)) {
