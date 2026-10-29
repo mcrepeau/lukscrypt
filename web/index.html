@@ -916,9 +916,10 @@ async function toggleDetails(id) {
 }
 
 function renderDetails(d, vaultId) {
-  const slots = (d.keyslots || []).map(k =>
-    `<span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)} &middot; ${esc(k.status)}</span>`
-  ).join('');
+  // LUKS2 supports 32 keyslots, LUKS1 only 8. The details panel shows just
+  // the count — the individual slots are listed in the manage modal.
+  const maxSlots = d.version === '1' ? 8 : 32;
+  const usedSlots = (d.keyslots || []).filter(k => k.status === 'valid' || k.status === 'enabled').length;
 
   return `
     <div class="vault-meta">
@@ -930,7 +931,7 @@ function renderDetails(d, vaultId) {
       <div class="meta-row">
         <span class="meta-label">Keyslots</span>
         <span class="meta-value">
-          ${slots || 'none'}
+          ${usedSlots} of ${maxSlots}
           <button class="btn btn-ghost btn-tiny" onclick="showManageKeySlots(${vaultId})">Manage keyslots</button>
         </span>
       </div>
