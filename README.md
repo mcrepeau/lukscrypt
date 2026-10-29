@@ -17,6 +17,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 - Vault metadata persisted in SQLite (WAL mode); runtime state derived live from the OS
 - Configurable storage and mount base directories via environment variables
 - Edit a locked vault's registered image path and mount location — after moving or restoring image files server-side, reconcile the record instead of deleting and recreating the vault
+- Grow a mounted vault online (image + LUKS device + filesystem) — grow-only by design; vaults cannot be shrunk
 - Mounts propagate to the host via shared bind-mount so SMB shares see the vault contents
 - Concurrent lock/unlock/create operations serialized to prevent device-mapper races
 - Graceful shutdown: unlocked vaults are locked (unmounted + closed) on SIGTERM/SIGINT so restarts never leave stale device-mapper or loop devices on the host
@@ -297,6 +298,24 @@ the record. Vault name and mount point convention stay as they were.
 is a single small SQLite file, so copying it off the NAS is trivial and makes
 restoring a matter of putting the images back where the record expects them.
 
+### Growing a vault
+
+A mounted vault can be grown online — the filesystem stays available and is
+extended in place:
+
+```
+fallocate -l <new size>  ← extend the image file (dd append fallback)
+cryptsetup resize        ← the LUKS device picks up the new size
+resize2fs                ← the ext4 filesystem grows while mounted
+```
+
+Growing is **online and grow-only**: ext4 cannot shrink without an offline
+fsck/resize sequence that is too data-destructive to automate, so the API refuses
+same-or-smaller sizes with `422`. Each step can fail independently and every
+failure state is recoverable by re-running the grow after a lock/unlock cycle —
+a failed `cryptsetup resize` merely leaves an extended image with a stale device
+size. The `VAULT_MAX_SIZE_GB` cap from creation applies to grows too.
+
 ### Create
 
 1. Enter a vault name (lowercase letters, numbers, hyphens — max 64 chars), storage directory, size (GB) and password
@@ -343,6 +362,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
 | `PUT` | `/api/vaults/{id}` | Yes | Updates the image `path` and/or `mount_dir` of a locked vault; `409` if unlocked, `422` if the new path is not a LUKS container |
+| `POST` | `/api/vaults/{id}/grow` | Yes | Grows a mounted vault to `size_gb` (online); grow-only, `409` if not mounted |
 | `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |
 | `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Removes a keyslot by index (returns re-read LUKS details); returns `409` if it is the last valid keyslot |
 | `GET` | `/api/vaults/details/{id}` | Yes | LUKS header details (cipher, hash, key size, keyslots, UUID) — read-only, no passphrase required, works on locked vaults |

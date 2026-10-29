@@ -132,6 +132,9 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	mux.HandleFunc("POST /api/vaults/{id}/unlock", h.unlockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/lock", h.lockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/mount", h.mountVault)
+	// Grow is online-safe while mounted; it holds the operation mutex for
+	// the whole run so lock/unlock cannot race the resize.
+	mux.HandleFunc("POST /api/vaults/{id}/grow", h.growVault)
 	// Keyslot management — mutates the LUKS header, so handlers take opMu.
 	// The existing passphrase required by both is the same brute-force
 	// surface as unlock, hence the same rate limiting.
@@ -645,6 +648,76 @@ func (h *handler) updateVaultPaths(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, toResponse(*updated, vault.ReadMounts()))
 }
 
+// growVault extends a vault's image, LUKS device and ext4 filesystem.
+// The vault must be unlocked (ideally mounted — the grow is online-safe);
+// grow-only by design. Runs synchronously under opMu: fallocate makes the
+// common case near-instant, and the lock prevents a concurrent unlock from
+// tearing down the device mid-resize.
+func (h *handler) growVault(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		jsonErr(w, "invalid vault id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		SizeGB int `json:"size_gb"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.SizeGB <= 0 {
+		jsonErr(w, "size_gb must be positive", http.StatusBadRequest)
+		return
+	}
+	if req.SizeGB > h.maxSizeGB {
+		jsonErr(w, fmt.Sprintf("size_gb exceeds maximum allowed size of %d GB", h.maxSizeGB), http.StatusBadRequest)
+		return
+	}
+	v, ok := h.lookupVault(w, id)
+	if !ok {
+		return
+	}
+	h.opMu.Lock()
+	defer h.opMu.Unlock()
+	// Re-fetch under the lock so a just-completed concurrent grow is
+	// accounted for before validating the grow-only rule.
+	fresh, err := h.db.GetVault(id)
+	if err != nil {
+		jsonErr(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	v = fresh
+	// Unlocked, and mounted for preference: resize2fs is online-safe while
+	// mounted, and an unlocked-but-unmounted grow would need an offline fsck.
+	if !vaultIsUnlocked(v) {
+		jsonErr(w, "vault must be unlocked before growing — unlock and mount it first", http.StatusConflict)
+		return
+	}
+	if !vaultIsMounted(v) {
+		jsonErr(w, "vault must be mounted before growing", http.StatusConflict)
+		return
+	}
+	if req.SizeGB <= v.SizeGB {
+		jsonErr(w, fmt.Sprintf("grow only — vault is already %d GB; shrinking is not supported", v.SizeGB), http.StatusUnprocessableEntity)
+		return
+	}
+	if err := vaultGrow(h.ctx, v, req.SizeGB); err != nil {
+		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	if err := h.db.UpdateVaultSize(id, req.SizeGB); err != nil {
+		jsonErr(w, "vault grew but updating the record failed", http.StatusInternalServerError)
+		return
+	}
+	updated, err := h.db.GetVault(id)
+	if err != nil {
+		jsonErr(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, toResponse(*updated, vault.ReadMounts()))
+}
+
 // pathInStorageDir reports whether the file path p is located inside one of
 // the allowlisted storage directories. The trailing-slash guard prevents
 // prefix confusion ("/vaults2/x.img" must not match allowlist "/vaults").
@@ -913,6 +986,9 @@ func (h *handler) csrfGuard(next http.Handler) http.Handler {
 // tests can simulate an unlocked vault without a real /dev/mapper entry.
 var vaultIsUnlocked = vault.IsUnlocked
 
+// vaultIsMounted follows the same pattern for the mounted state check.
+var vaultIsMounted = vault.IsMounted
+
 // vaultDumpDetails is a package-level indirection over vault.DumpDetails so
 // tests can stub the cryptsetup subprocess.
 var vaultDumpDetails = vault.DumpDetails
@@ -930,6 +1006,9 @@ var (
 	vaultUnlockKeyFile = vault.UnlockKeyFile
 	vaultAddKeyFile    = vault.AddKeyFile
 )
+
+// vaultGrow indirection over vault.Grow for the same reason.
+var vaultGrow = vault.Grow
 
 // decodeKeyFile decodes and validates a base64 keyfile upload: 8 bytes to
 // 1 MiB, mirroring the password policy (the content IS the credential).

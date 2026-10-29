@@ -801,6 +801,154 @@ func TestUpdateVaultPathsSuccess(t *testing.T) {
 	}
 }
 
+// --- POST /api/vaults/{id}/grow -------------------------------------------------
+
+func stubVaultState(t *testing.T, unlocked bool, mounted bool, grow func(context.Context, *db.Vault, int) error) {
+	t.Helper()
+	origUnlock, origMounted, origGrow := vaultIsUnlocked, vaultIsMounted, vaultGrow
+	vaultIsUnlocked = func(*db.Vault) bool { return unlocked }
+	vaultIsMounted = func(*db.Vault) bool { return mounted }
+	if grow != nil {
+		vaultGrow = grow
+	}
+	t.Cleanup(func() { vaultIsUnlocked, vaultIsMounted, vaultGrow = origUnlock, origMounted, origGrow })
+}
+
+func TestGrowVaultValidation(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	path := fmt.Sprintf("/api/vaults/%d/grow", v.ID)
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{"zero size", map[string]any{"size_gb": 0}},
+		{"negative size", map[string]any{"size_gb": -5}},
+		{"exceeds max", map[string]any{"size_gb": 101}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := request(h, http.MethodPost, path, "admin", "testpass", "10.9.9.9:9", tt.body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGrowVaultNotFound(t *testing.T) {
+	h, _ := newTestMux(t)
+	w := auth(h, http.MethodPost, "/api/vaults/99999/grow", map[string]any{"size_gb": 20})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("got %d, want 404", w.Code)
+	}
+}
+
+func TestGrowVaultMustBeMounted(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	tests := []struct {
+		name     string
+		unlocked bool
+		mounted  bool
+	}{
+		{"locked vault", false, false},
+		{"unlocked but not mounted", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubVaultState(t, tt.unlocked, tt.mounted, nil)
+			w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 20})
+			if w.Code != http.StatusConflict {
+				t.Errorf("got %d, want 409; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGrowVaultGrowOnly(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	growCalled := false
+	stubVaultState(t, true, true, func(context.Context, *db.Vault, int) error {
+		growCalled = true
+		return nil
+	})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 10})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422; body: %s", w.Code, w.Body.String())
+	}
+	if growCalled {
+		t.Error("vault.Grow was invoked despite same-size request")
+	}
+}
+
+func TestGrowVaultSuccess(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var gotSize int
+	stubVaultState(t, true, true, func(_ context.Context, _ *db.Vault, sizeGB int) error {
+		gotSize = sizeGB
+		return nil
+	})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 25})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if gotSize != 25 {
+		t.Errorf("vault.Grow called with %d, want 25", gotSize)
+	}
+	var resp vaultResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.SizeGB != 25 {
+		t.Errorf("response size_gb = %d, want 25", resp.SizeGB)
+	}
+	got, err := database.GetVault(v.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.SizeGB != 25 {
+		t.Errorf("db record size_gb = %d, want 25", got.SizeGB)
+	}
+}
+
+func TestGrowVaultFailure(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	stubVaultState(t, true, true, func(context.Context, *db.Vault, int) error {
+		return fmt.Errorf("cryptsetup resize: Operation aborted")
+	})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 25})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422", w.Code)
+	}
+	// The size display must not have been updated.
+	got, err := database.GetVault(v.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.SizeGB != 10 {
+		t.Errorf("db record size_gb = %d, want 10 (unchanged)", got.SizeGB)
+	}
+}
+
 // --- POST /api/vaults/{id}/keyslot/add ----------------------------------------
 
 func stubKeyOps(t *testing.T, add func(*db.Vault, string, string, int) error, kill func(*db.Vault, string, int) error, dump func(*db.Vault) (*vault.LUKSDetails, error)) {

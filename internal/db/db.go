@@ -125,3 +125,10 @@ func (d *DB) UpdateVaultPaths(id int64, path, mountPoint string) error {
 	_, err := d.conn.Exec(`UPDATE vaults SET path = ?, mount_point = ? WHERE id = ?`, path, mountPoint, id)
 	return err
 }
+
+// UpdateVaultSize updates the size_gb display field after a successful grow.
+// The authoritative size is the image file on disk; this is metadata.
+func (d *DB) UpdateVaultSize(id int64, sizeGB int) error {
+	_, err := d.conn.Exec(`UPDATE vaults SET size_gb = ? WHERE id = ?`, sizeGB, id)
+	return err
+}
