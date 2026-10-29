@@ -62,6 +62,14 @@ services:
       - "8080:8080"
     volumes:
       - lukscrypt-data:/data
+      # Vault image files MUST live on a persistent bind mount (as here) or a
+      # named volume. If /vaults is left in the container's writable layer,
+      # the .img files are destroyed whenever the container is recreated
+      # (compose down, image upgrade, ...) while the database survives —
+      # leaving ghost vault entries that can no longer be unlocked.
+      - type: bind
+        source: /srv/lukscrypt/vaults   # adjust to a persistent host path
+        target: /vaults
       - type: bind
         source: /mnt         # adjust to match your NAS layout
         target: /mnt

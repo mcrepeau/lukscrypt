@@ -7,6 +7,13 @@ services:
     volumes:
       # Persist the SQLite database
       - lukscrypt-data:/data
+      # Vault image files MUST live on a persistent bind mount or named
+      # volume. Without this, images are stored in the container's writable
+      # layer and are destroyed whenever the container is recreated
+      # (compose down, image upgrade, ...).
+      - type: bind
+        source: /srv/lukscrypt/vaults   # adjust to a persistent host path
+        target: /vaults
       # Shared propagation: mounts created inside the container propagate to
       # the host. Requires the host directories to be shared mounts — on
       # Debian 12 with systemd this is the default. If not, run once on the
