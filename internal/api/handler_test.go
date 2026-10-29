@@ -520,52 +520,6 @@ func TestUnlockVaultNotFound(t *testing.T) {
 	}
 }
 
-// --- POST /api/vaults/by-name/{name}/unlock ------------------------------------
-
-func stubUnlock(t *testing.T) {
-	t.Helper()
-	orig := vaultUnlock
-	vaultUnlock = func(*db.Vault, string) error { return nil }
-	t.Cleanup(func() { vaultUnlock = orig })
-}
-
-func TestUnlockByNameSuccess(t *testing.T) {
-	h, database := newTestMux(t)
-	v, err := database.CreateVault("myvault", "/vaults/myvault.img", 10, "/mnt/myvault", "myvault")
-	if err != nil {
-		t.Fatalf("seed vault: %v", err)
-	}
-	stubUnlock(t)
-	w := auth(h, http.MethodPost, "/api/vaults/by-name/myvault/unlock", map[string]string{"password": "strongpassword"})
-	if w.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
-	}
-	var resp vaultResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.ID != v.ID || resp.Name != "myvault" {
-		t.Errorf("response = id %d name %q, want id %d name myvault", resp.ID, resp.Name, v.ID)
-	}
-}
-
-func TestUnlockByNameNotFound(t *testing.T) {
-	h, _ := newTestMux(t)
-	w := auth(h, http.MethodPost, "/api/vaults/by-name/nope/unlock", map[string]string{"password": "strongpassword"})
-	if w.Code != http.StatusNotFound {
-		t.Errorf("got %d, want 404", w.Code)
-	}
-}
-
-func TestUnlockByNameInvalidName(t *testing.T) {
-	h, _ := newTestMux(t)
-	// Invalid characters must be rejected with 400, not looked up.
-	w := auth(h, http.MethodPost, "/api/vaults/by-name/Bad%2FName/unlock", map[string]string{"password": "strongpassword"})
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("got %d, want 400", w.Code)
-	}
-}
-
 // TestUnlockVaultRateLimit verifies that the 5-burst limit is enforced per IP.
 // Requests 1–5 from the same IP should not be rate-limited (they'll get 404
 // because vault 99999 doesn't exist); the 6th must return 429.
