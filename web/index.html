@@ -214,6 +214,29 @@
   }
   .keyslot-row .keyslot-chip { margin: 0; }
   .btn-tiny { font-size: .68rem; padding: 2px 8px; margin-left: 6px; }
+
+  /* ── Credential type tabs (password / keyfile) ── */
+  .tab-group {
+    display: flex;
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: .9rem;
+  }
+  .tab {
+    flex: 1;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-dim);
+    font-size: .78rem;
+    font-weight: 600;
+    padding: .4rem .5rem;
+    cursor: pointer;
+  }
+  .tab:hover:not(.active) { color: var(--text-muted); }
+  .tab.active { background: var(--primary); color: #0d1117; }
   .vault-details .details-loading { color: var(--text-dim); font-size: .78rem; }
   .vault-details .details-error   { color: var(--danger); font-size: .78rem; }
 
@@ -598,6 +621,10 @@
       Enter the password for <strong id="unlock-vault-name" style="color:var(--text)"></strong>.
     </p>
     <div>
+      <div class="tab-group">
+        <button type="button" class="tab active" id="unlock-tab-password" onclick="setUnlockMode('password')">Password</button>
+        <button type="button" class="tab" id="unlock-tab-keyfile" onclick="setUnlockMode('keyfile')">Keyfile</button>
+      </div>
       <div class="form-group" id="unlock-pass-group">
         <label class="form-label">Password <span>*</span></label>
         <input type="password" id="unlock-pass" onkeydown="if(event.key==='Enter')submitUnlock()">
@@ -609,7 +636,6 @@
           The file's raw bytes are used as the credential — pick the exact same file that was added as a keyslot.
         </small>
       </div>
-      <button type="button" class="btn btn-ghost btn-tiny" style="margin:0 0 1rem" id="unlock-mode-toggle" onclick="toggleUnlockKeyfile()">Use a keyfile instead</button>
       <div class="form-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal('unlock-modal')">Cancel</button>
         <button type="button" class="btn btn-primary" id="unlock-btn" onclick="submitUnlock()">Unlock</button>
@@ -674,6 +700,11 @@
       The existing vault data is not touched.
     </p>
     <div>
+      <p style="font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px;margin-bottom:.4rem">Existing credential</p>
+      <div class="tab-group">
+        <button type="button" class="tab active" id="ks-existing-tab-password" onclick="setKsExistingMode('password')">Password</button>
+        <button type="button" class="tab" id="ks-existing-tab-keyfile" onclick="setKsExistingMode('keyfile')">Keyfile</button>
+      </div>
       <div class="form-group" id="ks-existing-group">
         <label class="form-label">Existing password <span>*</span></label>
         <input type="password" id="ks-existing" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
@@ -682,7 +713,11 @@
         <label class="form-label">Existing keyfile <span>*</span></label>
         <input type="file" id="ks-existing-keyfile" style="color:var(--text-muted)">
       </div>
-      <button type="button" class="btn btn-ghost btn-tiny" style="margin:0 0 1rem" id="ks-existing-toggle" onclick="toggleKsExistingKeyfile()">Use a keyfile instead</button>
+      <p style="font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px;margin-bottom:.4rem">New credential</p>
+      <div class="tab-group">
+        <button type="button" class="tab active" id="ks-new-tab-password" onclick="setKsNewMode('password')">Password</button>
+        <button type="button" class="tab" id="ks-new-tab-keyfile" onclick="setKsNewMode('keyfile')">Keyfile</button>
+      </div>
       <div class="form-group" id="ks-new-group">
         <label class="form-label">New password <span>*</span></label>
         <input type="password" id="ks-new" onkeydown="if(event.key==='Enter')submitAddKeySlot()">
@@ -699,7 +734,6 @@
           somewhere safe (e.g. a password manager attachment) is ideal.
         </small>
       </div>
-      <button type="button" class="btn btn-ghost btn-tiny" style="margin:0 0 1rem" id="ks-new-toggle" onclick="toggleKsNewKeyfile()">Use a keyfile instead</button>
       <div class="form-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal('keyslot-add-modal')">Cancel</button>
         <button type="button" class="btn btn-primary" id="keyslot-add-btn" onclick="submitAddKeySlot()">Add keyslot</button>
@@ -1003,10 +1037,8 @@ function renderManageKeySlots(id) {
 
 function showAddKeySlot(id) {
   pendingKeySlotVaultId = id;
-  ksExistingUsesKeyfile = false;
-  ksNewUsesKeyfile = false;
-  updateKsExistingMode();
-  updateKsNewMode();
+  setKsExistingMode('password');
+  setKsNewMode('password');
   const v = vaults.find(x => x.id === id);
   document.getElementById('keyslot-add-vault-name').textContent = v ? v.name : `#${id}`;
   ['ks-existing', 'ks-new', 'ks-new2'].forEach(x => document.getElementById(x).value = '');
@@ -1018,27 +1050,21 @@ function showAddKeySlot(id) {
   setTimeout(() => document.getElementById('ks-existing').focus(), 120);
 }
 
-function toggleKsExistingKeyfile() {
-  ksExistingUsesKeyfile = !ksExistingUsesKeyfile;
-  updateKsExistingMode();
+function setKsExistingMode(mode) {
+  ksExistingUsesKeyfile = mode === 'keyfile';
+  document.getElementById('ks-existing-tab-password').classList.toggle('active', mode === 'password');
+  document.getElementById('ks-existing-tab-keyfile').classList.toggle('active', mode === 'keyfile');
+  document.getElementById('ks-existing-group').style.display = mode === 'password' ? '' : 'none';
+  document.getElementById('ks-existing-keyfile-group').style.display = mode === 'keyfile' ? '' : 'none';
 }
 
-function updateKsExistingMode() {
-  document.getElementById('ks-existing-group').style.display = ksExistingUsesKeyfile ? 'none' : '';
-  document.getElementById('ks-existing-keyfile-group').style.display = ksExistingUsesKeyfile ? '' : 'none';
-  document.getElementById('ks-existing-toggle').textContent = ksExistingUsesKeyfile ? 'Use a password instead' : 'Use a keyfile instead';
-}
-
-function toggleKsNewKeyfile() {
-  ksNewUsesKeyfile = !ksNewUsesKeyfile;
-  updateKsNewMode();
-}
-
-function updateKsNewMode() {
-  document.getElementById('ks-new-group').style.display = ksNewUsesKeyfile ? 'none' : '';
-  document.getElementById('ks-new2-group').style.display = ksNewUsesKeyfile ? 'none' : '';
-  document.getElementById('ks-new-keyfile-group').style.display = ksNewUsesKeyfile ? '' : 'none';
-  document.getElementById('ks-new-toggle').textContent = ksNewUsesKeyfile ? 'Use a password instead' : 'Use a keyfile instead';
+function setKsNewMode(mode) {
+  ksNewUsesKeyfile = mode === 'keyfile';
+  document.getElementById('ks-new-tab-password').classList.toggle('active', mode === 'password');
+  document.getElementById('ks-new-tab-keyfile').classList.toggle('active', mode === 'keyfile');
+  document.getElementById('ks-new-group').style.display = mode === 'password' ? '' : 'none';
+  document.getElementById('ks-new2-group').style.display = mode === 'password' ? '' : 'none';
+  document.getElementById('ks-new-keyfile-group').style.display = mode === 'keyfile' ? '' : 'none';
 }
 
 async function submitAddKeySlot() {
@@ -1267,8 +1293,7 @@ function selectedKeyfile(inputId) {
 
 function showUnlock(id) {
   pendingUnlockId = id;
-  unlockUsesKeyfile = false;
-  updateUnlockMode();
+  setUnlockMode('password');
   const v = vaults.find(x => x.id === id);
   document.getElementById('unlock-vault-name').textContent = v ? v.name : `#${id}`;
   document.getElementById('unlock-pass').value = '';
@@ -1282,15 +1307,12 @@ function showUnlock(id) {
   }, 120);
 }
 
-function toggleUnlockKeyfile() {
-  unlockUsesKeyfile = !unlockUsesKeyfile;
-  updateUnlockMode();
-}
-
-function updateUnlockMode() {
-  document.getElementById('unlock-pass-group').style.display = unlockUsesKeyfile ? 'none' : '';
-  document.getElementById('unlock-keyfile-group').style.display = unlockUsesKeyfile ? '' : 'none';
-  document.getElementById('unlock-mode-toggle').textContent = unlockUsesKeyfile ? 'Use a password instead' : 'Use a keyfile instead';
+function setUnlockMode(mode) {
+  unlockUsesKeyfile = mode === 'keyfile';
+  document.getElementById('unlock-tab-password').classList.toggle('active', mode === 'password');
+  document.getElementById('unlock-tab-keyfile').classList.toggle('active', mode === 'keyfile');
+  document.getElementById('unlock-pass-group').style.display = mode === 'password' ? '' : 'none';
+  document.getElementById('unlock-keyfile-group').style.display = mode === 'keyfile' ? '' : 'none';
 }
 
 async function submitUnlock() {
