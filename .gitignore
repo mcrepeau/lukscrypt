@@ -4,3 +4,6 @@
 # Go build output
 /lukscrypt
 /lukscrypt.exe
+
+# Local dev override for building instead of pulling the registry image
+docker-compose.override.yml
