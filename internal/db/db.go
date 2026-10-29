@@ -112,6 +112,19 @@ func (d *DB) GetVault(id int64) (*Vault, error) {
 	return &v, nil
 }
 
+// GetVaultByName resolves a vault by its unique name. Used by the by-name
+// unlock route so documented scripts don't depend on database ids.
+func (d *DB) GetVaultByName(name string) (*Vault, error) {
+	var v Vault
+	err := d.conn.QueryRow(
+		`SELECT id, name, path, size_gb, mount_point, mapper_name, created_at FROM vaults WHERE name = ?`, name,
+	).Scan(&v.ID, &v.Name, &v.Path, &v.SizeGB, &v.MountPoint, &v.MapperName, &v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 func (d *DB) DeleteVault(id int64) error {
 	_, err := d.conn.Exec(`DELETE FROM vaults WHERE id = ?`, id)
 	return err

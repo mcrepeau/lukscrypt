@@ -10,6 +10,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 - View LUKS header details per vault (version, cipher, hash, key size, keyslots, UUID) — lazily loaded, works on locked vaults
 - Manage passphrase keyslots (add/remove) — multiple passphrases per vault without re-encrypting data; the last valid keyslot is protected
 - Unlock with a password or a keyfile, and add keyfile-based keyslots (e.g. a random blob kept in a password manager as a break-glass credential)
+- Scriptable unlocking by vault name over the API — no auto-unlock by design; credentials never rest on the NAS
 - Real-time creation progress over Server-Sent Events
 - Fast allocation via `fallocate` (near-instantaneous); falls back to `dd` on unsupported filesystems
 - HTTP Basic Auth — a random password is generated on first start if none is configured
@@ -239,6 +240,36 @@ environment:
 When more than one option is configured a dropdown appears in the UI.
 When only one is configured the field is hidden and the value is used automatically.
 
+### Unlocking without the browser
+
+Vaults can be unlocked from a script or another machine with the documented API —
+referencing vaults by **name** so scripts don't depend on database ids (which can
+change if the database is rebuilt):
+
+```bash
+curl -su "$USER:$PASS" -H 'Content-Type: application/json' \
+  -d '{"password": "..."}' \
+  http://nas.local:8080/api/vaults/by-name/private/unlock
+```
+
+Or with a keyfile that stays on your machine:
+
+```bash
+curl -su "$USER:$PASS" -H 'Content-Type: application/json' \
+  -d "{\"key_file\": \"$(base64 -w0 vault.key)\"}" \
+  http://nas.local:8080/api/vaults/by-name/private/unlock
+```
+
+**There is no auto-unlock feature, by design.** Unlocking a vault should require a
+human decision: if the key were stored anywhere the NAS can reach autonomously —
+most obviously on the NAS itself — a thief who takes the machine would take the key
+with it, and encryption-at-rest would protect nothing against physical theft. After
+a reboot, vaults stay locked until you unlock them from your browser or with the
+commands above; the credential never rests on the NAS.
+
+Run these over TLS (see [Reverse proxy and HTTPS](#reverse-proxy-and-https)) — the
+password or keyfile travels in the request body.
+
 ### Mount point convention
 
 Vaults are always mounted at `<VAULT_MOUNT_DIRS entry>/<vault-name>`.
@@ -289,6 +320,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults` | Yes | Creates a new vault (returns `202` with `job_id`) |
 | `GET` | `/api/vaults/events/{job_id}` | Yes | SSE stream for vault creation progress |
 | `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault with `password` or base64 `key_file` |
+| `POST` | `/api/vaults/by-name/{name}/unlock` | Yes | Same, addressed by vault name (stable for scripts) |
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
 | `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |

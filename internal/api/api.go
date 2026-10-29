@@ -126,6 +126,10 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	mux.HandleFunc("DELETE /api/vaults/{id}", h.deleteVault)
 	// Actions
 	mux.HandleFunc("POST /api/vaults/{id}/unlock", h.unlockVault)
+	// By-name unlock: for scripts (see README "Unlocking without the
+	// browser") so they don't depend on database ids, which can change when
+	// the database is rebuilt.
+	mux.HandleFunc("POST /api/vaults/by-name/{name}/unlock", h.unlockVaultByName)
 	mux.HandleFunc("POST /api/vaults/{id}/lock", h.lockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/mount", h.mountVault)
 	// Keyslot management — mutates the LUKS header, so handlers take opMu.
@@ -334,46 +338,94 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "too many unlock attempts — wait before trying again", http.StatusTooManyRequests)
 		return
 	}
+	password, key, ok := h.parseUnlockCredentials(w, r)
+	if !ok {
+		return
+	}
 	id, err := parseID(r)
 	if err != nil {
 		jsonErr(w, "invalid vault id", http.StatusBadRequest)
-		return
-	}
-	var req struct {
-		Password string `json:"password"`
-		KeyFile  string `json:"key_file"` // base64-encoded keyfile bytes
-	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		jsonErr(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	// Exactly one of password / key_file must be provided.
-	if (req.Password == "") == (req.KeyFile == "") {
-		jsonErr(w, "provide either password or key_file (not both)", http.StatusBadRequest)
-		return
-	}
-	var key []byte
-	if req.KeyFile != "" {
-		if key, err = decodeKeyFile(req.KeyFile); err != nil {
-			jsonErr(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-	} else if len(req.Password) < 8 {
-		jsonErr(w, "password must be at least 8 characters", http.StatusBadRequest)
 		return
 	}
 	v, ok := h.lookupVault(w, id)
 	if !ok {
 		return
 	}
+	h.unlockResolved(w, password, key, v)
+}
+
+// unlockVaultByName is unlockVault addressed by vault name instead of id, for
+// documented scripts (see README "Unlocking without the browser").
+func (h *handler) unlockVaultByName(w http.ResponseWriter, r *http.Request) {
+	if !h.unlockAllowed(r) {
+		jsonErr(w, "too many unlock attempts — wait before trying again", http.StatusTooManyRequests)
+		return
+	}
+	password, key, ok := h.parseUnlockCredentials(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	if !isValidVaultName(name) {
+		jsonErr(w, "invalid vault name", http.StatusBadRequest)
+		return
+	}
+	v, err := h.db.GetVaultByName(name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonErr(w, "vault not found", http.StatusNotFound)
+		} else {
+			jsonErr(w, "database error", http.StatusInternalServerError)
+		}
+		return
+	}
+	h.unlockResolved(w, password, key, v)
+}
+
+// parseUnlockCredentials decodes the request body and validates the
+// password-or-keyfile pair, writing the error response itself. Runs before
+// any vault lookup so malformed requests are rejected without leaking
+// which vault ids exist.
+func (h *handler) parseUnlockCredentials(w http.ResponseWriter, r *http.Request) (password string, key []byte, ok bool) {
+	var req struct {
+		Password string `json:"password"`
+		KeyFile  string `json:"key_file"` // base64-encoded keyfile bytes
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return "", nil, false
+	}
+	// Exactly one of password / key_file must be provided.
+	if (req.Password == "") == (req.KeyFile == "") {
+		jsonErr(w, "provide either password or key_file (not both)", http.StatusBadRequest)
+		return "", nil, false
+	}
+	if req.KeyFile != "" {
+		key, err := decodeKeyFile(req.KeyFile)
+		if err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return "", nil, false
+		}
+		return "", key, true
+	}
+	if len(req.Password) < 8 {
+		jsonErr(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return "", nil, false
+	}
+	return req.Password, nil, true
+}
+
+// unlockResolved performs the serialized unlock once the vault record and
+// validated credential are in hand.
+func (h *handler) unlockResolved(w http.ResponseWriter, password string, key []byte, v *db.Vault) {
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
-	if req.KeyFile != "" {
+	if key != nil {
 		if err := vaultUnlockKeyFile(v, key); err != nil {
 			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
-	} else if err := vaultUnlock(v, req.Password); err != nil {
+	} else if err := vaultUnlock(v, password); err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
