@@ -17,6 +17,7 @@ import (
 
 	"lukscrypt/internal/api"
 	"lukscrypt/internal/db"
+	"lukscrypt/internal/vault"
 )
 
 //go:embed web/index.html
@@ -104,12 +105,38 @@ func main() {
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer drainCancel()
+	drainErr := srv.Shutdown(drainCtx)
+	if drainErr != nil {
+		// Don't exit yet: locking the vaults below is more important than a
+		// clean HTTP drain. Exit with a non-zero status afterwards.
+		slog.Error("HTTP shutdown timed out; continuing to vault locking", "err", drainErr)
+	}
 
-	if err := srv.Shutdown(drainCtx); err != nil {
-		slog.Error("shutdown timed out", "err", err)
+	// Graceful shutdown locking: close every unlocked vault so no stale
+	// device-mapper or loop devices remain on the host kernel (they outlive
+	// the container). This runs after the HTTP drain so no unlock/lock
+	// handler is in flight; the operation mutex's protection is therefore
+	// not needed. Requires the container's stop grace period to exceed the
+	// drain timeout — otherwise the SIGKILL lands here (see stop_grace_period
+	// in docker-compose.yml).
+	slog.Info("locking unlocked vaults for shutdown")
+	lockCtx, lockCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer lockCancel()
+	failures := vault.LockAllUnlocked(lockCtx, database)
+	for _, f := range failures {
+		slog.Error("shutdown lock failed — vault may remain open on the host", "vault", f.Vault, "err", f.Err)
+	}
+	switch {
+	case len(failures) > 0:
+		slog.Warn("shutdown complete with vaults still unlocked", "count", len(failures))
+	case drainErr != nil:
+		// drained uncleanly but all vaults locked
+	default:
+		slog.Info("shutdown complete — all vaults locked")
+	}
+	if drainErr != nil {
 		os.Exit(1)
 	}
-	slog.Info("shutdown complete")
 }
 
 // parseMaxSize parses a positive integer env var, falling back to defaultVal.

@@ -33,6 +33,10 @@ services:
       #                           # unlock rate limiting uses X-Forwarded-For
     privileged: true
     restart: unless-stopped
+    # Graceful shutdown needs to drain HTTP connections and lock every
+    # unlocked vault (umount + luksClose) before the process exits; the
+    # default 10s SIGKILL grace period would cut that short.
+    stop_grace_period: 60s
 
 volumes:
   lukscrypt-data:

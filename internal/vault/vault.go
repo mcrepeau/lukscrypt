@@ -286,20 +286,65 @@ func unlockWith(v *db.Vault, stdin io.Reader, extraArgs ...string) error {
 // It handles the unlocked-but-not-mounted state (e.g. after a failed mount or
 // a manual umount) by skipping the umount step when nothing is mounted.
 func Lock(v *db.Vault) error {
+	return LockContext(context.Background(), v)
+}
+
+// LockContext is Lock bounded by ctx: the umount and luksClose subprocesses
+// are interrupted (SIGKILL) if ctx is cancelled or times out. Used by the
+// graceful-shutdown path so a busy mount cannot stall the whole exit.
+func LockContext(ctx context.Context, v *db.Vault) error {
 	mounts := ReadMounts()
 	unlocked, mounted := StatusIn(v, mounts)
 	if !unlocked {
 		return fmt.Errorf("vault is already locked")
 	}
 	if mounted {
-		if out, err := exec.Command("umount", v.MountPoint).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "umount", v.MountPoint).CombinedOutput(); err != nil {
 			return fmt.Errorf("umount: %s", strings.TrimSpace(string(out)))
 		}
 	}
-	if out, err := exec.Command("cryptsetup", "luksClose", v.MapperName).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "cryptsetup", "luksClose", v.MapperName).CombinedOutput(); err != nil {
 		return fmt.Errorf("luksClose: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// VaultLockError pairs a vault name with the error that prevented locking it
+// during shutdown, so the caller can log exactly which vaults remain open.
+type VaultLockError struct {
+	Vault string
+	Err   error
+}
+
+// isUnlocked is a package-level indirection over IsUnlocked so tests can
+// simulate unlocked vaults without real device-mapper entries.
+var isUnlocked = IsUnlocked
+
+// LockAllUnlocked locks every vault that is currently unlocked, unmounting
+// first where needed. It exists for graceful shutdown: a container restart
+// must not leave stale device-mapper or loop devices on the host kernel
+// (they outlive the container). Failures are collected per vault and
+// returned — a partial cleanup is better than none, and the caller must
+// still exit. Each vault gets its own timeout so one busy mount cannot
+// consume the whole budget.
+func LockAllUnlocked(ctx context.Context, database *db.DB) []VaultLockError {
+	vaults, err := database.ListVaults()
+	if err != nil {
+		return []VaultLockError{{Vault: "(list vaults)", Err: err}}
+	}
+	var failures []VaultLockError
+	for i := range vaults {
+		v := vaults[i]
+		if !isUnlocked(&v) {
+			continue
+		}
+		opCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if err := LockContext(opCtx, &v); err != nil {
+			failures = append(failures, VaultLockError{Vault: v.Name, Err: err})
+		}
+		cancel()
+	}
+	return failures
 }
 
 // Mount mounts an already-unlocked vault at its configured mount point.

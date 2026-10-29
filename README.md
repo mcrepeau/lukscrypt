@@ -17,6 +17,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 - Configurable storage and mount base directories via environment variables
 - Mounts propagate to the host via shared bind-mount so SMB shares see the vault contents
 - Concurrent lock/unlock/create operations serialized to prevent device-mapper races
+- Graceful shutdown: unlocked vaults are locked (unmounted + closed) on SIGTERM/SIGINT so restarts never leave stale device-mapper or loop devices on the host
 - Rate-limited unlock endpoint to slow brute-force password attempts
 
 ## Architecture
@@ -85,10 +86,19 @@ services:
       # AUTH_PASSWORD: changeme   # default: random, printed once in container logs
     privileged: true
     restart: unless-stopped
+    # Graceful shutdown drains HTTP and locks every unlocked vault; the default
+    # 10s SIGKILL grace period would cut that short.
+    stop_grace_period: 60s
 
 volumes:
   lukscrypt-data:
 ```
+
+On `SIGTERM`/`SIGINT` the server drains HTTP connections, then locks every vault that
+is currently unlocked (unmount + `cryptsetup luksClose`), so a container stop or
+restart never leaves stale device-mapper or loop devices on the host kernel. Failures
+are logged per vault and don't prevent the exit — if a vault's mount is busy (e.g.
+an SMB client holds open files), the log will name it.
 
 ### 2. Deploy on the NAS
 
