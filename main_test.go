@@ -1,11 +1,70 @@
 package main
 
 import (
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"reflect"
 	"testing"
+	"time"
 )
+
+// The server must have request-side timeouts so slowloris-style connections
+// (even unauthenticated) are closed instead of being held open forever — and
+// stalling srv.Shutdown() during the graceful drain.
+func TestNewHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer(http.NewServeMux())
+	if srv.ReadHeaderTimeout != 10*time.Second {
+		t.Errorf("ReadHeaderTimeout = %v, want 10s", srv.ReadHeaderTimeout)
+	}
+	if srv.ReadTimeout != 30*time.Second {
+		t.Errorf("ReadTimeout = %v, want 30s", srv.ReadTimeout)
+	}
+	if srv.IdleTimeout != 120*time.Second {
+		t.Errorf("IdleTimeout = %v, want 120s", srv.IdleTimeout)
+	}
+	// WriteTimeout must stay zero: it is an absolute per-response deadline and
+	// would kill long-lived SSE progress streams mid-creation.
+	if srv.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, must be 0 (SSE streams are long-lived)", srv.WriteTimeout)
+	}
+}
+
+// Behavioral check: a connection that sends only partial headers is closed by
+// the server once ReadHeaderTimeout elapses. Short timeouts keep the test fast;
+// newHTTPServer pins the production values.
+func TestServerClosesSlowHeaderConnection(t *testing.T) {
+	srv := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		ReadHeaderTimeout: 300 * time.Millisecond,
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// Incomplete headers: no terminating blank line, so the request never
+	// completes and the header deadline must fire.
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	start := time.Now()
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("server did not close the stalled connection")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("connection closed after %v, want ~300ms (ReadHeaderTimeout)", elapsed)
+	}
+}
 
 func TestParseList(t *testing.T) {
 	tests := []struct {

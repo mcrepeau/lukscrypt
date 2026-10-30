@@ -85,10 +85,7 @@ func main() {
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
 
-	srv := &http.Server{
-		Addr:    ":8080",
-		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, trustProxy, autoLockHours, version),
-	}
+	srv := newHTTPServer(api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, trustProxy, autoLockHours, version))
 
 	go func() {
 		slog.Info("lukscrypt listening", "addr", srv.Addr)
@@ -141,6 +138,27 @@ func main() {
 	}
 	if drainErr != nil {
 		os.Exit(1)
+	}
+}
+
+// newHTTPServer builds the HTTP server with defensive timeouts. Without them,
+// slowloris-style connections — even unauthenticated ones — are held open
+// indefinitely and also stall srv.Shutdown() during the graceful drain.
+//
+// WriteTimeout is deliberately left at zero: it is an absolute per-response
+// deadline, and the SSE progress stream (/api/vaults/events/{jobID}) is a
+// long-lived response — a vault creation on a filesystem without fallocate
+// (dd fallback) can stream progress for tens of minutes on large images.
+// ReadHeaderTimeout/ReadTimeout only bound reading the request and
+// IdleTimeout only applies between keep-alive requests, so none of them
+// affect an in-flight SSE stream.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,  // slowloris: bound header reading
+		ReadTimeout:       30 * time.Second,  // whole request incl. body (keyfile uploads)
+		IdleTimeout:       120 * time.Second, // keep-alive connections between requests
 	}
 }
 
