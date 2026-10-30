@@ -31,6 +31,8 @@ services:
       # AUTH_PASSWORD: changeme   # default: random, printed once in container logs
       # TRUST_PROXY: "true"       # set when running behind a TLS reverse proxy so
       #                           # unlock rate limiting uses X-Forwarded-For
+      # AUTO_LOCK_HOURS: "6"      # lock vaults after 6 hours unlocked; a float
+      #                           # works (0.5 = 30 min); default 0 = disabled
     privileged: true
     restart: unless-stopped
     # Graceful shutdown needs to drain HTTP connections and lock every

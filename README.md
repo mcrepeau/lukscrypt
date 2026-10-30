@@ -86,6 +86,8 @@ services:
       VAULT_MOUNT_DIRS: /mnt
       # TRUST_PROXY: "true"      # set when behind a reverse proxy (rate limiting
       #                           # then uses X-Forwarded-For)
+      # AUTO_LOCK_HOURS: "6"     # lock vaults after 6 hours unlocked; a float
+      #                           # works (0.5 = 30 min); default 0 = disabled
       # AUTH_USER: admin          # default: admin
       # AUTH_PASSWORD: changeme   # default: random, printed once in container logs
     privileged: true
