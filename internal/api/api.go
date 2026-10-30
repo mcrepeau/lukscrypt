@@ -1081,6 +1081,15 @@ func (h *handler) autoLockVault(id int64, now time.Time) {
 	lockCtx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
 	defer cancel()
 	h.opMu.Lock()
+	// Re-read the window under opMu: a manual lock→unlock between the read at
+	// the top of this function and this lock restarts the window, and the
+	// sweep must not lock a freshly unlocked vault. opMu→unlockedMu is the
+	// established lock order (unlockVault marks under opMu), so calling
+	// unlockedSince here cannot deadlock.
+	if h.windowRestarted(id, since) {
+		h.opMu.Unlock()
+		return
+	}
 	err = vaultAutoLock(lockCtx, v)
 	h.opMu.Unlock()
 	if err != nil {
@@ -1108,6 +1117,13 @@ func (h *handler) unlockedSince(id int64) time.Time {
 	h.unlockedMu.Lock()
 	defer h.unlockedMu.Unlock()
 	return h.unlockedAt[id]
+}
+
+// windowRestarted reports whether the vault's unlock timestamp no longer
+// matches since — i.e. the auto-lock window was restarted (or cleared) after
+// since was read. The caller must hold opMu.
+func (h *handler) windowRestarted(id int64, since time.Time) bool {
+	return !h.unlockedSince(id).Equal(since)
 }
 
 // cleanupJobs removes job entries that have been around for more than 30 minutes.

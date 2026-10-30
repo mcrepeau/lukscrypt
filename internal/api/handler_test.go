@@ -1427,6 +1427,47 @@ func TestAutoLockClearsAlreadyLocked(t *testing.T) {
 }
 
 // Unlock through the API starts the window; manual lock ends it.
+// The sweep re-reads the unlock timestamp under opMu and must not lock a
+// vault whose window was restarted (manual lock→unlock) after the timestamp
+// was first read.
+func TestWindowRestartedGuard(t *testing.T) {
+	h := &handler{unlockedAt: make(map[int64]time.Time)}
+	t1 := time.Now().Add(-time.Hour)
+	h.unlockedMu.Lock()
+	h.unlockedAt[7] = t1
+	h.unlockedMu.Unlock()
+
+	if h.windowRestarted(7, t1) {
+		t.Error("unchanged window reported as restarted")
+	}
+	// A manual unlock restarts the window → detected.
+	h.markUnlocked(7)
+	if !h.windowRestarted(7, t1) {
+		t.Error("restarted window (new timestamp) not detected")
+	}
+	// A manual lock clears the entry (zero time) → also "changed".
+	h.clearUnlocked(7)
+	if !h.windowRestarted(7, t1) {
+		t.Error("cleared window not detected")
+	}
+}
+
+// autoLockVault with an unchanged timestamp proceeds to the lock even when
+// called directly (the sweep's expiry filter is bypassed here; the guard
+// must pass because the window did not restart).
+func TestAutoLockVaultProceedsWhenWindowUnchanged(t *testing.T) {
+	h, v := newAutoLockHandler(t, 1, 30*time.Minute) // fresh window
+	called := false
+	stubAutoLock(t, func(context.Context, *db.Vault) error {
+		called = true
+		return nil
+	})
+	h.autoLockVault(v.ID, time.Now())
+	if !called {
+		t.Error("autoLockVault skipped the lock although the window did not restart")
+	}
+}
+
 func TestUnlockLockBookkeeping(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
