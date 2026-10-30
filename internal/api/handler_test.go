@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -712,6 +713,8 @@ func TestImportVaultValidation(t *testing.T) {
 		{"invalid name", map[string]any{"name": "BadName", "path": "/vaults/x.img", "mount_dir": "/mnt"}},
 		{"path outside storage dirs", map[string]any{"name": "x", "path": "/etc/x.img", "mount_dir": "/mnt"}},
 		{"path in sibling dir with shared prefix", map[string]any{"name": "x", "path": "/vaults2/x.img", "mount_dir": "/mnt"}},
+		{"path traversal with dot-dot", map[string]any{"name": "x", "path": "/vaults/../etc/x.img", "mount_dir": "/mnt"}},
+		{"path traversal with double slash", map[string]any{"name": "x", "path": "/vaults//../etc/x.img", "mount_dir": "/mnt"}},
 		{"mount dir not allowed", map[string]any{"name": "x", "path": "/vaults/x.img", "mount_dir": "/tmp"}},
 	}
 	for _, tt := range tests {
@@ -808,6 +811,114 @@ func TestImportVaultSuccess(t *testing.T) {
 	}
 	if got.Path != img || got.SizeGB != 3 {
 		t.Errorf("db record = %+v", got)
+	}
+}
+
+// pathInStorageDir canonicalizes before the prefix check: a ".." segment must
+// not let an image outside the allowlist be registered (and later unlocked,
+// mounted or deleted) through the import endpoint.
+func TestImportVaultRejectsTraversal(t *testing.T) {
+	root := filepath.ToSlash(t.TempDir())
+	storage := root + "/vaults"
+	outside := root + "/secret"
+	if err := os.MkdirAll(storage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside+"/secret.img", []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, database := newTestMuxWithDirs(t, []string{storage}, []string{"/mnt"})
+	// If validation were bypassed the import would succeed — the stub turns a
+	// bypass into a visible 201 instead of the expected 400.
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return &vault.LUKSDetails{Version: "2"}, nil
+	})
+	paths := []string{
+		storage + "/../secret/secret.img",
+		storage + "/./../secret/secret.img",
+		storage + "//../secret/secret.img",
+		storage + "/sub/../../secret/secret.img",
+		outside + "/secret.img", // absolute path outside the allowlist
+	}
+	for _, p := range paths {
+		t.Run(p, func(t *testing.T) {
+			w := auth(h, http.MethodPost, "/api/vaults/import",
+				map[string]any{"name": "evil", "path": p, "mount_dir": "/mnt"})
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+	if v, err := database.GetVaultByName("evil"); err == nil {
+		t.Errorf("vault record was created from a traversal path: %+v", v)
+	}
+}
+
+// A symlink inside a storage dir must not let an import point outside the
+// allowlist: both the file and the storage dir are resolved (EvalSymlinks)
+// before the containment check.
+func TestImportVaultRejectsSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Symlink requires privileges on Windows")
+	}
+	root := filepath.ToSlash(t.TempDir())
+	storage := root + "/vaults"
+	outside := root + "/secret"
+	if err := os.MkdirAll(storage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside+"/secret.img", []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside+"/secret.img", storage+"/link.img"); err != nil {
+		t.Fatal(err)
+	}
+	h, database := newTestMuxWithDirs(t, []string{storage}, []string{"/mnt"})
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return &vault.LUKSDetails{Version: "2"}, nil
+	})
+	w := auth(h, http.MethodPost, "/api/vaults/import",
+		map[string]any{"name": "link", "path": storage + "/link.img", "mount_dir": "/mnt"})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	if v, err := database.GetVaultByName("link"); err == nil {
+		t.Errorf("vault record was created through a symlink escape: %+v", v)
+	}
+}
+
+// A ".." segment that stays inside the allowlist is fine, but the stored
+// record must hold the canonical path, never the raw input.
+func TestImportVaultStoresCleanedPath(t *testing.T) {
+	storage := filepath.ToSlash(t.TempDir())
+	img := storage + "/real.img"
+	if err := os.WriteFile(img, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(img, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	h, database := newTestMuxWithDirs(t, []string{storage}, []string{"/mnt"})
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return &vault.LUKSDetails{Version: "2"}, nil
+	})
+	w := auth(h, http.MethodPost, "/api/vaults/import",
+		map[string]any{"name": "real", "path": storage + "/sub/../real.img", "mount_dir": "/mnt"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("got %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+	got, err := database.GetVaultByName("real")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Path != img {
+		t.Errorf("stored path = %q, want canonical %q", got.Path, img)
 	}
 }
 

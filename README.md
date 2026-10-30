@@ -340,7 +340,10 @@ POST /api/vaults/import
 
 Import registers an existing image file — nothing is created or copied. The image must
 live inside an allowlisted storage directory and be a readable LUKS container (validated
-before the record is created); its size is derived from the file. A path already
+before the record is created); its size is derived from the file. The submitted path is
+canonicalized first — `..` segments and symlinks are resolved before the allowlist check —
+so an image outside the allowlisted directories cannot be registered via traversal or a
+link, and the stored record always holds the canonical path. A path already
 registered to another vault is refused with `409` — two mapper names over one image
 would corrupt data. Import is also the recovery path after a lost database: register
 each surviving image and the vaults are back.

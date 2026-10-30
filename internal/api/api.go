@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -620,10 +621,13 @@ func (h *handler) importVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "vault name may only contain lowercase letters, numbers, and hyphens (max 64 chars)", http.StatusBadRequest)
 		return
 	}
-	if !h.pathInStorageDir(req.Path) {
+	cleanedPath, ok := h.pathInStorageDir(req.Path)
+	if !ok {
 		jsonErr(w, "path is not inside an allowed storage directory", http.StatusBadRequest)
 		return
 	}
+	// Store the canonical path so vault records never contain ".." segments.
+	req.Path = cleanedPath
 	if !h.allowedMountDir(req.MountDir) {
 		jsonErr(w, "mount directory not allowed", http.StatusBadRequest)
 		return
@@ -777,17 +781,43 @@ func (h *handler) growVault(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, toResponse(*updated, vault.ReadMounts()))
 }
 
-// pathInStorageDir reports whether the file path p is located inside one of
-// the allowlisted storage directories. The trailing-slash guard prevents
-// prefix confusion ("/vaults2/x.img" must not match allowlist "/vaults").
-func (h *handler) pathInStorageDir(p string) bool {
+// pathInStorageDir canonicalizes p and reports whether the file it refers to
+// is located inside one of the allowlisted storage directories. It returns the
+// cleaned path, which the caller should persist so records stay canonical.
+//
+// Two checks, in order:
+//   - syntactic: filepath.Clean collapses ".", ".." and duplicate slashes, so
+//     "/vaults/../secret.img" cleans to "/secret.img" and fails the prefix
+//     check. The trailing-slash guard keeps "/vaults2/x.img" from matching
+//     allowlist "/vaults".
+//   - semantic: when both sides can be resolved, symlinks are resolved on the
+//     file AND the storage dir, and the resolved file must stay inside the
+//     resolved dir — a symlink planted inside a storage dir cannot point
+//     outside the allowlist.
+//
+// If resolution fails (e.g. the storage dir or file does not exist yet), the
+// syntactic result stands; a missing image is rejected later by the LUKS
+// probe / stat with a more precise error.
+func (h *handler) pathInStorageDir(p string) (string, bool) {
+	// Clean collapses ".", ".." and duplicate separators; ToSlash normalizes
+	// to forward slashes so the prefix checks behave identically on every OS
+	// (on the Linux target both are no-ops).
+	cleaned := filepath.ToSlash(filepath.Clean(p))
+	native := filepath.Clean(p)
 	for _, dir := range h.storageDirs {
 		dir = strings.TrimSuffix(dir, "/")
-		if dir != "" && strings.HasPrefix(p, dir+"/") {
-			return true
+		if dir == "" || !strings.HasPrefix(cleaned, dir+"/") {
+			continue
 		}
+		resolvedDir, dirErr := filepath.EvalSymlinks(filepath.FromSlash(dir))
+		resolved, fileErr := filepath.EvalSymlinks(native)
+		if dirErr == nil && fileErr == nil {
+			return cleaned, strings.HasPrefix(
+				filepath.ToSlash(resolved), filepath.ToSlash(resolvedDir)+"/")
+		}
+		return cleaned, true
 	}
-	return false
+	return cleaned, false
 }
 
 // vaultDetails returns the vault's LUKS header information (cipher, hash,
