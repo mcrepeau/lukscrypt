@@ -393,6 +393,121 @@ func TestCreateVaultDuplicateInFlight(t *testing.T) {
 	}
 }
 
+// newCreateTestHandler builds a handler wired for calling createVault
+// directly, with the maps createVault needs initialized.
+func newCreateTestHandler(t *testing.T, database *db.DB) *handler {
+	t.Helper()
+	return &handler{
+		ctx:            context.Background(),
+		db:             database,
+		storageDirs:    []string{"/vaults"},
+		mountDirs:      []string{"/mnt"},
+		authUser:       "admin",
+		authPass:       "testpass",
+		maxSizeGB:      100,
+		autoLockHours:  0.02,
+		jobs:           make(map[string]*jobEntry),
+		pendingNames:   make(map[string]struct{}),
+		pendingPaths:   make(map[string]struct{}),
+		unlockLimiters: make(map[string]*unlockEntry),
+		authLimiters:   make(map[string]*unlockEntry),
+		unlockedAt:     make(map[int64]time.Time),
+	}
+}
+
+func callCreateVault(h *handler, body map[string]any) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/vaults", bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	h.createVault(w, req)
+	return w
+}
+
+// waitPendingReleased polls until the create goroutine has released the
+// pending-name reservation (its defer runs after the auto-lock marking).
+func waitPendingReleased(t *testing.T, h *handler, name string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		h.opMu.Lock()
+		_, pending := h.pendingNames[name]
+		h.opMu.Unlock()
+		if !pending {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("create goroutine did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func isMarkedUnlocked(h *handler, id int64) bool {
+	h.unlockedMu.Lock()
+	defer h.unlockedMu.Unlock()
+	_, ok := h.unlockedAt[id]
+	return ok
+}
+
+// A vault created via POST /api/vaults ends up unlocked and mounted — its
+// auto-lock window must start at creation, not only on an explicit unlock
+// (regression: created vaults were never auto-locked).
+func TestCreateVaultStartsAutoLockWindow(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	h := newCreateTestHandler(t, database)
+
+	// Simulate a successful create pipeline: insert the DB record.
+	origCreate := vaultCreate
+	vaultCreate = func(_ context.Context, d *db.DB, name, path string, sizeGB int, _ string, mountPoint string, ch chan<- vault.ProgressEvent) {
+		defer close(ch)
+		d.CreateVault(name, path+"/"+name+".img", sizeGB, mountPoint, name)
+	}
+	t.Cleanup(func() { vaultCreate = origCreate })
+	origIsUnlocked := vaultIsUnlocked
+	vaultIsUnlocked = func(*db.Vault) bool { return true }
+	t.Cleanup(func() { vaultIsUnlocked = origIsUnlocked })
+
+	if w := callCreateVault(h, validCreateBody()); w.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202; body: %s", w.Code, w.Body.String())
+	}
+	waitPendingReleased(t, h, "myvault")
+	if !isMarkedUnlocked(h, 1) {
+		t.Error("created vault was not marked unlocked — auto-lock would never lock it")
+	}
+}
+
+// A failed creation must NOT start an auto-lock window (no record, device
+// closed by cleanup).
+func TestCreateVaultFailureDoesNotStartAutoLockWindow(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	h := newCreateTestHandler(t, database)
+
+	origCreate := vaultCreate
+	vaultCreate = func(_ context.Context, _ *db.DB, _ string, _ string, _ int, _ string, _ string, ch chan<- vault.ProgressEvent) {
+		defer close(ch) // fails: no record inserted
+	}
+	t.Cleanup(func() { vaultCreate = origCreate })
+	origIsUnlocked := vaultIsUnlocked
+	vaultIsUnlocked = func(*db.Vault) bool { return true }
+	t.Cleanup(func() { vaultIsUnlocked = origIsUnlocked })
+
+	if w := callCreateVault(h, validCreateBody()); w.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202; body: %s", w.Code, w.Body.String())
+	}
+	waitPendingReleased(t, h, "myvault")
+	if isMarkedUnlocked(h, 1) {
+		t.Error("failed creation must not start an auto-lock window")
+	}
+}
+
 // --- DELETE /api/vaults/{id} -------------------------------------------------
 
 func TestDeleteVaultNotFound(t *testing.T) {

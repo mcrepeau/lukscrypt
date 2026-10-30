@@ -307,7 +307,15 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 			}
 			h.releasePending(req.Name, imgPath)
 		}()
-		vault.Create(h.ctx, h.db, req.Name, req.Path, req.SizeGB, req.Password, mountPoint, ch)
+		vaultCreate(h.ctx, h.db, req.Name, req.Path, req.SizeGB, req.Password, mountPoint, ch)
+		// A successfully created vault ends up unlocked and mounted — start its
+		// auto-lock window now. (The unlock endpoint marks its own vaults, and
+		// the startup scan covers crash-restarts; creation was the missing
+		// path, so created vaults were never auto-locked.)
+		if v, err := h.db.GetVaultByName(req.Name); err == nil && vaultIsUnlocked(v) {
+			h.markUnlocked(v.ID)
+			slog.Info("auto-lock: vault unlocked by creation — window starts now", "vault", req.Name)
+		}
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1259,6 +1267,10 @@ var (
 
 // vaultGrow indirection over vault.Grow for the same reason.
 var vaultGrow = vault.Grow
+
+// vaultCreate indirection over vault.Create so tests can simulate a
+// successful creation pipeline (which inserts the DB record).
+var vaultCreate = vault.Create
 
 // vaultAutoLock is vault.LockContext, used by the auto-lock sweep.
 var vaultAutoLock = vault.LockContext

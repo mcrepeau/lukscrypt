@@ -285,7 +285,9 @@ with the vault name, policy and how long it was unlocked.
 Two behaviors are deliberate:
 
 - **Duration-based, not activity-based.** The window starts when the vault is
-  unlocked; the container cannot observe host-side SMB access, so there is no
+  unlocked — a vault created through the API counts as unlocked from the moment
+  creation completes, since creation ends with the vault open and mounted. The
+  container cannot observe host-side SMB access, so there is no
   activity signal to reset it. The honest in-use detection happens at lock time:
   a mount with open SMB files makes the `umount` fail with *target is busy*, and
   the lock is simply retried on the next sweep. Lazy unmount is never used —
