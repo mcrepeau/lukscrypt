@@ -797,7 +797,7 @@
         <label class="form-label">Vault name <span>*</span></label>
         <input type="text" id="imp-name" placeholder="lowercase letters, numbers, hyphens" oninput="updateImportPreview()" onkeydown="if(event.key==='Enter')submitImport()">
       </div>
-      <div class="form-group">
+      <div class="form-group" id="imp-dir-group">
         <label class="form-label">Storage directory <span>*</span></label>
         <select id="imp-dir" onchange="updateImportPreview()"></select>
       </div>
@@ -1497,7 +1497,7 @@ async function confirmDelete() {
 
 function openImportModal() {
   ['imp-name', 'imp-file'].forEach(x => document.getElementById(x).value = '');
-  populateSelect('imp-dir', 'imp-dir', storageDirs);
+  populateSelect('imp-dir', 'imp-dir-group', storageDirs);
   populateSelect('imp-mount', 'imp-mount-group', mountDirs);
   updateImportPreview();
   const btn = document.getElementById('import-btn');
