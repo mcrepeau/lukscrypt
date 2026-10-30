@@ -657,18 +657,27 @@ func (h *handler) importVault(w http.ResponseWriter, r *http.Request) {
 }
 
 // growVault extends a vault's image, LUKS device and ext4 filesystem.
-// The vault must be unlocked (ideally mounted — the grow is online-safe);
-// grow-only by design. Runs synchronously under opMu: fallocate makes the
-// common case near-instant, and the lock prevents a concurrent unlock from
-// tearing down the device mid-resize.
+// Requires the unlock credential (password or keyfile) because cryptsetup
+// resize must re-derive the volume key — kernel-keyring reuse is unreliable
+// inside containers. The vault must be unlocked AND mounted (online resize2fs
+// is the safe path); grow-only by design. Runs synchronously under opMu.
 func (h *handler) growVault(w http.ResponseWriter, r *http.Request) {
+	// The credential is verified against a keyslot (cryptsetup resize must
+	// re-derive the volume key), so this is the same brute-force surface as
+	// unlock and shares its rate limiter.
+	if !h.unlockAllowed(r) {
+		jsonErr(w, "too many attempts — wait before trying again", http.StatusTooManyRequests)
+		return
+	}
 	id, err := parseID(r)
 	if err != nil {
 		jsonErr(w, "invalid vault id", http.StatusBadRequest)
 		return
 	}
 	var req struct {
-		SizeGB int `json:"size_gb"`
+		SizeGB   int    `json:"size_gb"`
+		Password string `json:"password"`
+		KeyFile  string `json:"key_file"` // base64-encoded keyfile bytes
 	}
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
@@ -681,6 +690,23 @@ func (h *handler) growVault(w http.ResponseWriter, r *http.Request) {
 	if req.SizeGB > h.maxSizeGB {
 		jsonErr(w, fmt.Sprintf("size_gb exceeds maximum allowed size of %d GB", h.maxSizeGB), http.StatusBadRequest)
 		return
+	}
+	// Exactly one credential, same rule as unlock.
+	if (req.Password == "") == (req.KeyFile == "") {
+		jsonErr(w, "provide either password or key_file (not both)", http.StatusBadRequest)
+		return
+	}
+	var key []byte
+	if req.KeyFile != "" {
+		if key, err = decodeKeyFile(req.KeyFile); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if len(req.Password) < 8 {
+		jsonErr(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	} else {
+		key = []byte(req.Password)
 	}
 	v, ok := h.lookupVault(w, id)
 	if !ok {
@@ -710,7 +736,7 @@ func (h *handler) growVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, fmt.Sprintf("grow only — vault is already %d GB; shrinking is not supported", v.SizeGB), http.StatusUnprocessableEntity)
 		return
 	}
-	if err := vaultGrow(h.ctx, v, req.SizeGB); err != nil {
+	if err := vaultGrow(h.ctx, v, req.SizeGB, key); err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}

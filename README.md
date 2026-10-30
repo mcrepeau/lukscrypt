@@ -312,6 +312,13 @@ cryptsetup resize        ← the LUKS device picks up the new size
 resize2fs                ← the ext4 filesystem grows while mounted
 ```
 
+The vault's credential (`password` or `key_file`) is required: `cryptsetup resize`
+must re-derive the volume key to reload the device-mapper table. On a normal host
+LUKS2 can reuse the kernel session keyring, but keyrings are unreliable inside
+containers, so lukscrypt always provides the credential explicitly — the same
+one that unlocks the vault. The grow endpoint shares unlock's rate limiter for
+the same reason.
+
 Growing is **online and grow-only**: ext4 cannot shrink without an offline
 fsck/resize sequence that is too data-destructive to automate, so the API refuses
 same-or-smaller sizes with `422`. Each step can fail independently and every
@@ -365,7 +372,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
 | `POST` | `/api/vaults/import` | Yes | Registers an existing image file as a vault (no copy); `409` if the name or path is already registered, `422` if not a LUKS container |
-| `POST` | `/api/vaults/{id}/grow` | Yes | Grows a mounted vault to `size_gb` (online); grow-only, `409` if not mounted |
+| `POST` | `/api/vaults/{id}/grow` | Yes | Grows a mounted vault to `size_gb` (online) with `password` or base64 `key_file`; grow-only, `409` if not mounted |
 | `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |
 | `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Removes a keyslot by index (returns re-read LUKS details); returns `409` if it is the last valid keyslot |
 | `GET` | `/api/vaults/details/{id}` | Yes | LUKS header details (cipher, hash, key size, keyslots, UUID) — read-only, no passphrase required, works on locked vaults |

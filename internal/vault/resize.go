@@ -1,10 +1,12 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"lukscrypt/internal/db"
@@ -13,6 +15,12 @@ import (
 // Grow extends a vault's image file, LUKS device and ext4 filesystem to
 // sizeGB. The vault must be unlocked — the dm device must be open — and the
 // operation is online-safe while mounted (resize2fs grows ext4 live).
+//
+// key is the unlock credential (raw passphrase or keyfile bytes).
+// cryptsetup resize must re-derive the volume key to reload the dm table;
+// on a normal host LUKS2 can take it from the kernel session keyring, but
+// keyrings are unreliable inside containers, so the credential is always
+// provided explicitly via stdin (--key-file=-, exact --keyfile-size).
 //
 // Grow-only by design: ext4 cannot shrink online, and an automated shrink
 // (umount, fsck, resize2fs down, truncate) is too data-destructive to
@@ -23,7 +31,7 @@ import (
 // changes nothing; a failed cryptsetup resize leaves an extended image with
 // a stale device size; a failed resize2fs leaves a resized device with a
 // stale filesystem.
-func Grow(ctx context.Context, v *db.Vault, sizeGB int) error {
+func Grow(ctx context.Context, v *db.Vault, sizeGB int, key []byte) error {
 	delta := sizeGB - v.SizeGB
 	if delta <= 0 {
 		return fmt.Errorf("new size must be greater than the current size of %d GB", v.SizeGB)
@@ -44,8 +52,12 @@ func Grow(ctx context.Context, v *db.Vault, sizeGB int) error {
 
 	// Step 2: resize the LUKS device. For file-backed vaults cryptsetup
 	// re-reads the backing size, including updating the loop device
-	// capacity, so the dm device sees the extended image.
-	if out, err := exec.CommandContext(ctx, "cryptsetup", "resize", v.MapperName).CombinedOutput(); err != nil {
+	// capacity, so the dm device sees the extended image. The credential
+	// on stdin supplies the volume key.
+	cmd := exec.CommandContext(ctx, "cryptsetup", "resize",
+		"--key-file=-", "--keyfile-size="+strconv.Itoa(len(key)), v.MapperName)
+	cmd.Stdin = bytes.NewReader(key)
+	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("cryptsetup resize: %s", strings.TrimSpace(string(out)))
 	}
 

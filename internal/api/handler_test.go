@@ -812,7 +812,7 @@ func TestImportVaultSuccess(t *testing.T) {
 
 // --- POST /api/vaults/{id}/grow -------------------------------------------------
 
-func stubVaultState(t *testing.T, unlocked bool, mounted bool, grow func(context.Context, *db.Vault, int) error) {
+func stubVaultState(t *testing.T, unlocked bool, mounted bool, grow func(context.Context, *db.Vault, int, []byte) error) {
 	t.Helper()
 	origUnlock, origMounted, origGrow := vaultIsUnlocked, vaultIsMounted, vaultGrow
 	vaultIsUnlocked = func(*db.Vault) bool { return unlocked }
@@ -821,6 +821,10 @@ func stubVaultState(t *testing.T, unlocked bool, mounted bool, grow func(context
 		vaultGrow = grow
 	}
 	t.Cleanup(func() { vaultIsUnlocked, vaultIsMounted, vaultGrow = origUnlock, origMounted, origGrow })
+}
+
+func growBody(sizeGB int) map[string]any {
+	return map[string]any{"size_gb": sizeGB, "password": "correct horse"}
 }
 
 func TestGrowVaultValidation(t *testing.T) {
@@ -834,13 +838,20 @@ func TestGrowVaultValidation(t *testing.T) {
 		name string
 		body map[string]any
 	}{
-		{"zero size", map[string]any{"size_gb": 0}},
-		{"negative size", map[string]any{"size_gb": -5}},
-		{"exceeds max", map[string]any{"size_gb": 101}},
+		{"zero size", growBody(0)},
+		{"negative size", growBody(-5)},
+		{"exceeds max", growBody(101)},
+		{"no credential", map[string]any{"size_gb": 20}},
+		{"both credentials", map[string]any{"size_gb": 20, "password": "correct horse", "key_file": b64("12345678")}},
+		{"short password", map[string]any{"size_gb": 20, "password": "short"}},
+		{"keyfile too short", map[string]any{"size_gb": 20, "key_file": b64("1234")}},
 	}
-	for _, tt := range tests {
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := request(h, http.MethodPost, path, "admin", "testpass", "10.9.9.9:9", tt.body)
+			// Fresh IP per case — the endpoint rate-limits before validating,
+			// and the burst is only 5 per IP.
+			ip := fmt.Sprintf("10.9.9.%d:9", 200+i)
+			w := request(h, http.MethodPost, path, "admin", "testpass", ip, tt.body)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
 			}
@@ -850,7 +861,7 @@ func TestGrowVaultValidation(t *testing.T) {
 
 func TestGrowVaultNotFound(t *testing.T) {
 	h, _ := newTestMux(t)
-	w := auth(h, http.MethodPost, "/api/vaults/99999/grow", map[string]any{"size_gb": 20})
+	w := auth(h, http.MethodPost, "/api/vaults/99999/grow", growBody(20))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("got %d, want 404", w.Code)
 	}
@@ -873,7 +884,7 @@ func TestGrowVaultMustBeMounted(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			stubVaultState(t, tt.unlocked, tt.mounted, nil)
-			w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 20})
+			w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), growBody(20))
 			if w.Code != http.StatusConflict {
 				t.Errorf("got %d, want 409; body: %s", w.Code, w.Body.String())
 			}
@@ -888,11 +899,11 @@ func TestGrowVaultGrowOnly(t *testing.T) {
 		t.Fatalf("seed vault: %v", err)
 	}
 	growCalled := false
-	stubVaultState(t, true, true, func(context.Context, *db.Vault, int) error {
+	stubVaultState(t, true, true, func(context.Context, *db.Vault, int, []byte) error {
 		growCalled = true
 		return nil
 	})
-	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 10})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), growBody(10))
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("got %d, want 422; body: %s", w.Code, w.Body.String())
 	}
@@ -908,16 +919,21 @@ func TestGrowVaultSuccess(t *testing.T) {
 		t.Fatalf("seed vault: %v", err)
 	}
 	var gotSize int
-	stubVaultState(t, true, true, func(_ context.Context, _ *db.Vault, sizeGB int) error {
+	var gotKey []byte
+	stubVaultState(t, true, true, func(_ context.Context, _ *db.Vault, sizeGB int, key []byte) error {
 		gotSize = sizeGB
+		gotKey = key
 		return nil
 	})
-	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 25})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), growBody(25))
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
 	}
 	if gotSize != 25 {
 		t.Errorf("vault.Grow called with %d, want 25", gotSize)
+	}
+	if string(gotKey) != "correct horse" {
+		t.Errorf("credential passed to vault.Grow = %q, want the typed password", gotKey)
 	}
 	var resp vaultResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
@@ -935,16 +951,38 @@ func TestGrowVaultSuccess(t *testing.T) {
 	}
 }
 
+// A keyfile credential must reach vault.Grow as the decoded bytes.
+func TestGrowVaultWithKeyFile(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	var gotKey []byte
+	stubVaultState(t, true, true, func(_ context.Context, _ *db.Vault, _ int, key []byte) error {
+		gotKey = key
+		return nil
+	})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID),
+		map[string]any{"size_gb": 25, "key_file": b64("a-file-keyfile-0123456789")})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if string(gotKey) != "a-file-keyfile-0123456789" {
+		t.Errorf("credential = %q, want decoded keyfile bytes", gotKey)
+	}
+}
+
 func TestGrowVaultFailure(t *testing.T) {
 	h, database := newTestMux(t)
 	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
 	if err != nil {
 		t.Fatalf("seed vault: %v", err)
 	}
-	stubVaultState(t, true, true, func(context.Context, *db.Vault, int) error {
-		return fmt.Errorf("cryptsetup resize: Operation aborted")
+	stubVaultState(t, true, true, func(context.Context, *db.Vault, int, []byte) error {
+		return fmt.Errorf("cryptsetup resize: Nothing to read on input")
 	})
-	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), map[string]any{"size_gb": 25})
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/grow", v.ID), growBody(25))
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("got %d, want 422", w.Code)
 	}
@@ -955,6 +993,22 @@ func TestGrowVaultFailure(t *testing.T) {
 	}
 	if got.SizeGB != 10 {
 		t.Errorf("db record size_gb = %d, want 10 (unchanged)", got.SizeGB)
+	}
+}
+
+// The grow endpoint shares unlock's per-IP rate limiter.
+func TestGrowVaultRateLimit(t *testing.T) {
+	h, _ := newTestMux(t)
+	const ip = "10.10.10.10:10"
+	for i := range 5 {
+		w := request(h, http.MethodPost, "/api/vaults/99999/grow", "admin", "testpass", ip, growBody(20))
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d unexpectedly rate-limited", i+1)
+		}
+	}
+	w := request(h, http.MethodPost, "/api/vaults/99999/grow", "admin", "testpass", ip, growBody(20))
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("6th request: got %d, want 429", w.Code)
 	}
 }
 

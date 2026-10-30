@@ -841,7 +841,8 @@
     </div>
     <p style="font-size:.82rem;color:var(--text-dim);margin-bottom:1rem">
       Extend <strong id="grow-vault-name" style="color:var(--text)"></strong> to a larger size.
-      The vault stays mounted and available while it grows.
+      The vault stays mounted and available while it grows. The vault's password is
+      needed to resize the underlying LUKS device.
     </p>
     <div>
       <div class="form-group">
@@ -851,6 +852,18 @@
       <div class="form-group">
         <label class="form-label">New size (GB) <span>*</span></label>
         <input type="number" id="grow-size" min="1" step="1" onkeydown="if(event.key==='Enter')submitGrow()">
+      </div>
+      <div class="tab-group">
+        <button type="button" class="tab active" id="grow-tab-password" onclick="setGrowCredMode('password')">Password</button>
+        <button type="button" class="tab" id="grow-tab-keyfile" onclick="setGrowCredMode('keyfile')">Keyfile</button>
+      </div>
+      <div class="form-group" id="grow-pass-group">
+        <label class="form-label">Password <span>*</span></label>
+        <input type="password" id="grow-pass" onkeydown="if(event.key==='Enter')submitGrow()">
+      </div>
+      <div class="form-group" id="grow-keyfile-group" style="display:none">
+        <label class="form-label">Keyfile <span>*</span></label>
+        <input type="file" id="grow-keyfile" style="color:var(--text-muted)">
       </div>
       <p style="font-size:.72rem;color:var(--warning);margin:-.4rem 0 1rem">
         Growing is quick but cannot be undone — vaults cannot be shrunk.
@@ -1549,13 +1562,28 @@ async function submitImport() {
 
 // ── Grow vault ─────────────────────────────────────────────────────────────────
 // Online grow while mounted: extend image, cryptsetup resize, resize2fs.
+// The credential is required by cryptsetup resize — it must re-derive the
+// volume key, and kernel-keyring reuse is unreliable inside containers.
+
+let growUsesKeyfile = false;
+
+function setGrowCredMode(mode) {
+  growUsesKeyfile = mode === 'keyfile';
+  document.getElementById('grow-tab-password').classList.toggle('active', mode === 'password');
+  document.getElementById('grow-tab-keyfile').classList.toggle('active', mode === 'keyfile');
+  document.getElementById('grow-pass-group').style.display = mode === 'password' ? '' : 'none';
+  document.getElementById('grow-keyfile-group').style.display = mode === 'keyfile' ? '' : 'none';
+}
 
 function showGrow(id) {
   pendingGrowId = id;
+  setGrowCredMode('password');
   const v = vaults.find(x => x.id === id);
   document.getElementById('grow-vault-name').textContent = v ? v.name : `#${id}`;
   document.getElementById('grow-current').value = v ? `${v.size_gb} GB` : '';
   document.getElementById('grow-size').value = v ? v.size_gb + 1 : '';
+  document.getElementById('grow-pass').value = '';
+  document.getElementById('grow-keyfile').value = '';
   const btn = document.getElementById('grow-btn');
   btn.disabled = false;
   btn.textContent = 'Grow vault';
@@ -1571,12 +1599,23 @@ async function submitGrow() {
   const size = parseInt(document.getElementById('grow-size').value, 10);
   if (!Number.isInteger(size) || size < 1) { toast('Enter a valid size in GB', 'error'); return; }
 
+  let body = { size_gb: size };
+  if (growUsesKeyfile) {
+    const f = selectedKeyfile('grow-keyfile');
+    if (!f) return;
+    try {
+      body.key_file = await fileToBase64(f);
+    } catch (e) { toast(e.message, 'error'); return; }
+  } else {
+    body.password = document.getElementById('grow-pass').value;
+  }
+
   const btn = document.getElementById('grow-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-inline"></span>Growing…';
 
   try {
-    const updated = await api('POST', `/api/vaults/${pendingGrowId}/grow`, { size_gb: size });
+    const updated = await api('POST', `/api/vaults/${pendingGrowId}/grow`, body);
     const idx = vaults.findIndex(x => x.id === pendingGrowId);
     if (idx !== -1) vaults[idx] = updated;
     renderVaults();
