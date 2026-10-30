@@ -840,6 +840,9 @@ func (h *handler) deleteVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to remove vault record", http.StatusInternalServerError)
 		return
 	}
+	// Stop tracking any leftover auto-lock window (possible when the vault
+	// was locked externally while the policy was disabled).
+	h.clearUnlocked(id)
 	if err := vault.Delete(v); err != nil {
 		slog.Warn("filesystem cleanup failed after DB delete", "vault", v.Name, "err", err)
 	}
