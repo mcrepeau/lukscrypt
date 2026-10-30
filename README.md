@@ -21,6 +21,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 - Mounts propagate to the host via shared bind-mount so SMB shares see the vault contents
 - Concurrent lock/unlock/create operations serialized to prevent device-mapper races
 - Graceful shutdown: unlocked vaults are locked (unmounted + closed) on SIGTERM/SIGINT so restarts never leave stale device-mapper or loop devices on the host
+- Optional auto-lock: lock vaults automatically after a configurable unlocked duration; busy mounts defer, they are never lazy-unmounted
 - Rate-limited unlock endpoint to slow brute-force password attempts
 
 ## Architecture
@@ -230,6 +231,7 @@ All configuration is via environment variables.
 | `AUTH_PASSWORD` | *(generated)* | HTTP Basic Auth password. If unset, a random 32-character hex password is generated at startup and printed to the container logs. Set this to a stable value in production. |
 | `VAULT_MAX_SIZE_GB` | `100` | Maximum size in GB that a vault may be created with. Must be a positive integer. |
 | `TRUST_PROXY` | `false` | Set to `true` only when running behind a trusted reverse proxy. Enables `X-Forwarded-For` for per-client rate limiting (only the last, proxy-appended entry is used). Leave `false` when the app is reachable directly — otherwise clients could spoof the header to bypass rate limiting. |
+| `AUTO_LOCK_HOURS` | `0` *(disabled)* | Maximum time a vault may stay unlocked before lukscrypt locks it automatically (e.g. `6`, or `0.5` for 30 minutes). A mount that is busy (open SMB files) defers the lock to the next sweep — auto-lock never lazy-unmounts, and it means *actually locked*. |
 
 ### Multiple storage / mount locations
 
@@ -270,6 +272,49 @@ commands above; the credential never rests on the NAS.
 
 Run these over TLS (see [Reverse proxy and HTTPS](#reverse-proxy-and-https)) — the
 password or keyfile travels in the request body.
+
+### Auto-lock
+
+Set `AUTO_LOCK_HOURS` to the maximum time a vault may stay unlocked (default `0` =
+disabled). A background sweep runs once a minute and locks every vault whose window
+has elapsed: unmount, `cryptsetup luksClose`, and a `vault auto-locked` log line
+with the vault name, policy and how long it was unlocked.
+
+Two behaviors are deliberate:
+
+- **Duration-based, not activity-based.** The window starts when the vault is
+  unlocked; the container cannot observe host-side SMB access, so there is no
+  activity signal to reset it. The honest in-use detection happens at lock time:
+  a mount with open SMB files makes the `umount` fail with *target is busy*, and
+  the lock is simply retried on the next sweep. Lazy unmount is never used —
+  auto-lock must mean actually locked.
+- **Crash-restarts restart the window.** Graceful shutdown locks everything, so
+  an unlocked vault at process start means the container was killed; its window
+  starts at process start (logged as `vault unlocked at startup`).
+
+### Logs and retention
+
+All events — every request plus domain events like `vault auto-locked`,
+`keyslot added`, `vault grown` — are logged as structured JSON to stdout
+(`docker logs lukscrypt`). Two operational notes:
+
+- **`docker compose down` deletes the container's logs** (a plain `stop` keeps
+  them). For an audit trail that survives recreations, ship logs off the host:
+  configure a logging driver (e.g. `journald`, `syslog`, or your collector), or
+  at minimum bound on-disk growth:
+
+  ```yaml
+  services:
+    lukscrypt:
+      logging:
+        driver: json-file
+        options:
+          max-size: "10m"
+          max-file: "3"
+  ```
+
+- The database itself (`/data`, a single SQLite file) holds only vault metadata —
+  copy it off the NAS as your configuration backup.
 
 ### Mount point convention
 

@@ -29,6 +29,12 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
 	}
+	if path == ":memory:" {
+		// An in-memory SQLite database is private to one connection; letting
+		// the pool open several would hand each test query a different empty
+		// database. Production uses a file, where pooling (WAL) is fine.
+		conn.SetMaxOpenConns(1)
+	}
 	if err := migrate(conn); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("migrate: %w", err)

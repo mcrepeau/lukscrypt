@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lukscrypt/internal/db"
 	"lukscrypt/internal/vault"
@@ -32,7 +33,7 @@ func newTestMux(t *testing.T) (http.Handler, *db.DB) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	h := NewMux(context.Background(), database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100, false, "test")
+	h := NewMux(context.Background(), database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100, false, 0, "test")
 	return h, database
 }
 
@@ -695,7 +696,7 @@ func newTestMuxWithDirs(t *testing.T, storageDirs, mountDirs []string) (http.Han
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	h := NewMux(context.Background(), database, embed.FS{}, storageDirs, mountDirs, "admin", "testpass", 100, false, "test")
+	h := NewMux(context.Background(), database, embed.FS{}, storageDirs, mountDirs, "admin", "testpass", 100, false, 0, "test")
 	return h, database
 }
 
@@ -1009,6 +1010,161 @@ func TestGrowVaultRateLimit(t *testing.T) {
 	w := request(h, http.MethodPost, "/api/vaults/99999/grow", "admin", "testpass", ip, growBody(20))
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("6th request: got %d, want 429", w.Code)
+	}
+}
+
+// --- Auto-lock -------------------------------------------------------------------
+
+func stubAutoLock(t *testing.T, fn func(context.Context, *db.Vault) error) {
+	t.Helper()
+	orig := vaultAutoLock
+	vaultAutoLock = fn
+	t.Cleanup(func() { vaultAutoLock = orig })
+}
+
+// newAutoLockHandler builds a handler struct directly (autoLockSweep tests
+// don't need the full router), with auto-lock enabled and one seeded vault.
+func newAutoLockHandler(t *testing.T, hours float64, seedAge time.Duration) (*handler, *db.Vault) {
+	t.Helper()
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	v, err := database.CreateVault("avault", "/vaults/avault.img", 1, "/mnt/avault", "avault")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	h := &handler{
+		ctx:           context.Background(),
+		db:            database,
+		autoLockHours: hours,
+		jobs:          make(map[string]*jobEntry),
+		pendingNames:  make(map[string]struct{}),
+		unlockLimiters: make(map[string]*unlockEntry),
+		unlockedAt:    make(map[int64]time.Time),
+	}
+	h.unlockedAt[v.ID] = time.Now().Add(-seedAge)
+	return h, v
+}
+
+func TestAutoLockSweepLocksExpiredVault(t *testing.T) {
+	h, v := newAutoLockHandler(t, 1, 2*time.Hour) // policy 1h, unlocked 2h ago
+	locked := false
+	stubAutoLock(t, func(context.Context, *db.Vault) error {
+		locked = true
+		return nil
+	})
+	h.autoLockSweep(time.Now())
+	if !locked {
+		t.Fatal("expired vault was not locked")
+	}
+	if _, ok := h.unlockedAt[v.ID]; ok {
+		t.Error("unlock timestamp not cleared after successful auto-lock")
+	}
+}
+
+func TestAutoLockSweepRespectsWindow(t *testing.T) {
+	h, _ := newAutoLockHandler(t, 1, 30*time.Minute) // policy 1h, unlocked 30 min ago
+	called := false
+	stubAutoLock(t, func(context.Context, *db.Vault) error {
+		called = true
+		return nil
+	})
+	h.autoLockSweep(time.Now())
+	if called {
+		t.Error("vault locked before the auto-lock window elapsed")
+	}
+}
+
+func TestAutoLockDisabled(t *testing.T) {
+	h, _ := newAutoLockHandler(t, 0, 24*time.Hour) // disabled, unlocked a day ago
+	called := false
+	stubAutoLock(t, func(context.Context, *db.Vault) error {
+		called = true
+		return nil
+	})
+	h.autoLockSweep(time.Now())
+	if called {
+		t.Error("vault locked although auto-lock is disabled")
+	}
+}
+
+// A busy mount (SMB clients hold files open) defers the lock: the timestamp
+// must be kept so the next sweep retries.
+func TestAutoLockDefersBusyMounts(t *testing.T) {
+	h, v := newAutoLockHandler(t, 1, 2*time.Hour)
+	stubAutoLock(t, func(context.Context, *db.Vault) error {
+		return fmt.Errorf("umount: /mnt/avault: target is busy")
+	})
+	h.autoLockSweep(time.Now())
+	if _, ok := h.unlockedAt[v.ID]; !ok {
+		t.Error("unlock timestamp cleared although the mount was busy — the vault would never be auto-locked")
+	}
+}
+
+// A vault locked out from under us (operator CLI) stops being tracked.
+func TestAutoLockClearsAlreadyLocked(t *testing.T) {
+	h, v := newAutoLockHandler(t, 1, 2*time.Hour)
+	stubAutoLock(t, func(context.Context, *db.Vault) error {
+		return fmt.Errorf("vault is already locked")
+	})
+	h.autoLockSweep(time.Now())
+	if _, ok := h.unlockedAt[v.ID]; ok {
+		t.Error("unlock timestamp kept for an already-locked vault")
+	}
+}
+
+// Unlock through the API starts the window; manual lock ends it.
+func TestUnlockLockBookkeeping(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	v, err := database.CreateVault("avault", "/vaults/avault.img", 1, "/mnt/avault", "avault")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	h := &handler{
+		ctx:            context.Background(),
+		db:             database,
+		jobs:           make(map[string]*jobEntry),
+		pendingNames:   make(map[string]struct{}),
+		unlockLimiters: make(map[string]*unlockEntry),
+		unlockedAt:    make(map[int64]time.Time),
+	}
+	origUnlock, origLock := vaultUnlock, vaultLock
+	vaultUnlock = func(*db.Vault, string) error { return nil }
+	vaultLock = func(*db.Vault) error { return nil }
+	t.Cleanup(func() { vaultUnlock, vaultLock = origUnlock, origLock })
+
+	// Unlock → timestamp recorded. PathValue must be set manually: the
+	// request bypasses the mux's pattern matching.
+	body := `{"password":"strongpassword"}`
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/vaults/%d/unlock", v.ID), strings.NewReader(body))
+	req.SetPathValue("id", fmt.Sprintf("%d", v.ID))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	h.unlockVault(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unlock: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if _, ok := h.unlockedAt[v.ID]; !ok {
+		t.Fatal("unlock did not record a timestamp")
+	}
+
+	// Lock → timestamp cleared.
+	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/vaults/%d/lock", v.ID), nil)
+	req.SetPathValue("id", fmt.Sprintf("%d", v.ID))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w = httptest.NewRecorder()
+	h.lockVault(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("lock: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if _, ok := h.unlockedAt[v.ID]; ok {
+		t.Error("lock did not clear the unlock timestamp")
 	}
 }
 

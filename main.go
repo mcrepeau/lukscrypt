@@ -59,6 +59,10 @@ func main() {
 	// default would let clients spoof their IP to the unlock rate limiter.
 	trustProxy := parseBool(os.Getenv("TRUST_PROXY"), false)
 
+	// AUTO_LOCK_HOURS: maximum time a vault may stay unlocked; 0 (default)
+	// disables auto-lock. A float allows sub-hour policies (e.g. 0.5 = 30 min).
+	autoLockHours := parseAutoLockHours(os.Getenv("AUTO_LOCK_HOURS"))
+
 	database, err := db.Open(dbPath)
 	if err != nil {
 		slog.Error("failed to open database", "err", err)
@@ -72,6 +76,7 @@ func main() {
 		"mount_dirs", mountDirs,
 		"max_vault_size_gb", maxSizeGB,
 		"trust_proxy", trustProxy,
+		"auto_lock_hours", autoLockHours,
 	)
 
 	// serverCtx is cancelled on shutdown to stop background goroutines and
@@ -82,7 +87,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, trustProxy, version),
+		Handler: api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, trustProxy, autoLockHours, version),
 	}
 
 	go func() {
@@ -165,6 +170,20 @@ func parseBool(env string, defaultVal bool) bool {
 		os.Exit(1)
 	}
 	return b
+}
+
+// parseAutoLockHours parses AUTO_LOCK_HOURS: empty or 0 disables auto-lock;
+// negative values are rejected. A float allows sub-hour policies (0.5 = 30 min).
+func parseAutoLockHours(env string) float64 {
+	if env == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(env, 64)
+	if err != nil || v < 0 {
+		slog.Error("AUTO_LOCK_HOURS must be a non-negative number of hours (e.g. 6 or 0.5; 0 disables)", "value", env)
+		os.Exit(1)
+	}
+	return v
 }
 
 // parseList splits a comma-separated env var and falls back to defaultVal if empty.

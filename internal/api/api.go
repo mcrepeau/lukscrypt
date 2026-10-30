@@ -62,6 +62,13 @@ type handler struct {
 	pendingNames   map[string]struct{} // names of vaults currently being created
 	unlockLimiters map[string]*unlockEntry
 	unlockMu       sync.Mutex
+	// autoLockHours is the maximum time a vault may stay unlocked; 0 disables
+	// auto-lock. unlockedAt records when each vault was unlocked, so the
+	// auto-lock sweep can enforce the policy. In-memory by design: runtime
+	// state is derived from the OS, not persisted.
+	autoLockHours float64
+	unlockedAt    map[int64]time.Time
+	unlockedMu    sync.Mutex
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code for
@@ -97,7 +104,7 @@ type vaultResponse struct {
 	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 }
 
-func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int, trustProxy bool, version string) http.Handler {
+func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int, trustProxy bool, autoLockHours float64, version string) http.Handler {
 	h := &handler{
 		ctx:            ctx,
 		version:        version,
@@ -107,14 +114,17 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 		mountDirs:      mountDirs,
 		authUser:       authUser,
 		authPass:       authPass,
-		maxSizeGB:      maxSizeGB,
-		trustProxy:     trustProxy,
-		jobs:           make(map[string]*jobEntry),
-		pendingNames:   make(map[string]struct{}),
-		unlockLimiters: make(map[string]*unlockEntry),
+		maxSizeGB:       maxSizeGB,
+		trustProxy:      trustProxy,
+		autoLockHours:   autoLockHours,
+		jobs:            make(map[string]*jobEntry),
+		pendingNames:    make(map[string]struct{}),
+		unlockLimiters:  make(map[string]*unlockEntry),
+		unlockedAt:      make(map[int64]time.Time),
 	}
 	go h.cleanupLimiters(ctx)
 	go h.cleanupJobs(ctx)
+	go h.autoLockLoop(ctx)
 
 	mux := http.NewServeMux()
 	// Static
@@ -382,6 +392,8 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
+	// Start (or restart) the auto-lock window for this vault.
+	h.markUnlocked(v.ID)
 	jsonOK(w, toResponse(*v, vault.ReadMounts()))
 }
 
@@ -397,10 +409,12 @@ func (h *handler) lockVault(w http.ResponseWriter, r *http.Request) {
 	}
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
-	if err := vault.Lock(v); err != nil {
+	if err := vaultLock(v); err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
+	// Manual lock ends the auto-lock window.
+	h.clearUnlocked(v.ID)
 	jsonOK(w, toResponse(*v, vault.ReadMounts()))
 }
 
@@ -501,6 +515,7 @@ func (h *handler) keyslotAdd(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		slog.Info("keyslot added", "vault", v.Name, "slot", slot, "credential", "password")
 	} else {
 		if existingCred == nil {
 			existingCred = []byte(req.ExistingPassword)
@@ -512,6 +527,13 @@ func (h *handler) keyslotAdd(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		credKind := "password+keyfile"
+		if req.NewKeyFile == "" {
+			credKind = "keyfile"
+		} else if req.ExistingKeyFile == "" {
+			credKind = "password"
+		}
+		slog.Info("keyslot added", "vault", v.Name, "slot", slot, "credential", credKind)
 	}
 	d, err := vaultDumpDetails(v)
 	if err != nil {
@@ -564,6 +586,7 @@ func (h *handler) keyslotRemove(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
+	slog.Info("keyslot removed", "vault", v.Name, "slot", req.KeySlot)
 	d, err = vaultDumpDetails(v)
 	if err != nil {
 		slog.Warn("keyslot removed but header re-read failed", "vault", v.Name, "err", err)
@@ -651,6 +674,7 @@ func (h *handler) importVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to register vault", http.StatusInternalServerError)
 		return
 	}
+	slog.Info("vault imported", "name", req.Name, "path", req.Path, "size_gb", sizeGB)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(toResponse(*v, vault.ReadMounts()))
@@ -740,6 +764,7 @@ func (h *handler) growVault(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
+	slog.Info("vault grown", "vault", v.Name, "from_gb", v.SizeGB, "to_gb", req.SizeGB)
 	if err := h.db.UpdateVaultSize(id, req.SizeGB); err != nil {
 		jsonErr(w, "vault grew but updating the record failed", http.StatusInternalServerError)
 		return
@@ -888,6 +913,115 @@ func (h *handler) unlockAllowed(r *http.Request) bool {
 	allowed := e.limiter.Allow()
 	h.unlockMu.Unlock()
 	return allowed
+}
+
+// ── Auto-lock ─────────────────────────────────────────────────────────────────
+// A background sweep enforces AUTO_LOCK_HOURS: the maximum time a vault may
+// stay unlocked. The policy is duration-based, not activity-based — the
+// container cannot observe host-side SMB access; a busy mount simply makes
+// the lock attempt fail with "target is busy", which defers the lock to the
+// next sweep. Lazy unmount is deliberately NOT used: auto-lock must mean
+// actually locked.
+
+func (h *handler) markUnlocked(id int64) {
+	h.unlockedMu.Lock()
+	h.unlockedAt[id] = time.Now()
+	h.unlockedMu.Unlock()
+}
+
+func (h *handler) clearUnlocked(id int64) {
+	h.unlockedMu.Lock()
+	delete(h.unlockedAt, id)
+	h.unlockedMu.Unlock()
+}
+
+// autoLockLoop sweeps once per minute. At startup, vaults that are still
+// unlocked (e.g. after a SIGKILL restart) get the process start time as the
+// beginning of their window — the graceful-shutdown locking normally ensures
+// there are none.
+func (h *handler) autoLockLoop(ctx context.Context) {
+	vaults, err := h.db.ListVaults()
+	if err != nil {
+		slog.Warn("auto-lock: could not list vaults at startup", "err", err)
+	} else {
+		for i := range vaults {
+			if vault.IsUnlocked(&vaults[i]) {
+				h.markUnlocked(vaults[i].ID)
+				slog.Info("auto-lock: vault unlocked at startup — window starts now", "vault", vaults[i].Name)
+			}
+		}
+	}
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.autoLockSweep(time.Now())
+		}
+	}
+}
+
+// autoLockSweep locks every vault whose unlocked window has exceeded the
+// policy. Lock attempts are serialized per vault under opMu, so a sweep can
+// never race a user-initiated lock/unlock/grow.
+func (h *handler) autoLockSweep(now time.Time) {
+	if h.autoLockHours <= 0 {
+		return
+	}
+	window := time.Duration(h.autoLockHours * float64(time.Hour))
+	h.unlockedMu.Lock()
+	expired := make([]int64, 0, len(h.unlockedAt))
+	for id, since := range h.unlockedAt {
+		if now.Sub(since) >= window {
+			expired = append(expired, id)
+		}
+	}
+	h.unlockedMu.Unlock()
+	for _, id := range expired {
+		h.autoLockVault(id, now)
+	}
+}
+
+func (h *handler) autoLockVault(id int64, now time.Time) {
+	since := h.unlockedSince(id)
+	v, err := h.db.GetVault(id)
+	if err != nil {
+		// Record vanished (deleted vault) — stop tracking it.
+		h.clearUnlocked(id)
+		return
+	}
+	lockCtx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
+	defer cancel()
+	h.opMu.Lock()
+	err = vaultAutoLock(lockCtx, v)
+	h.opMu.Unlock()
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "already locked"):
+			// Locked out from under us (operator CLI, etc.) — stop tracking.
+			h.clearUnlocked(id)
+		case strings.Contains(err.Error(), "busy"):
+			// In use via SMB — defer to the next sweep.
+			slog.Debug("auto-lock deferred: mount is busy", "vault", v.Name)
+		default:
+			slog.Warn("auto-lock failed", "vault", v.Name, "err", err)
+		}
+		return
+	}
+	h.clearUnlocked(id)
+	slog.Info("vault auto-locked",
+		"vault", v.Name,
+		"policy_hours", h.autoLockHours,
+		"unlocked_for", now.Sub(since).Round(time.Second).String(),
+	)
+}
+
+func (h *handler) unlockedSince(id int64) time.Time {
+	h.unlockedMu.Lock()
+	defer h.unlockedMu.Unlock()
+	return h.unlockedAt[id]
 }
 
 // cleanupJobs removes job entries that have been around for more than 30 minutes.
@@ -1043,6 +1177,12 @@ var (
 
 // vaultGrow indirection over vault.Grow for the same reason.
 var vaultGrow = vault.Grow
+
+// vaultAutoLock is vault.LockContext, used by the auto-lock sweep.
+var vaultAutoLock = vault.LockContext
+
+// vaultLock is vault.Lock (the manual lock path), stubbable in tests.
+var vaultLock = vault.Lock
 
 // decodeKeyFile decodes and validates a base64 keyfile upload: 8 bytes to
 // 1 MiB, mirroring the password policy (the content IS the credential).
