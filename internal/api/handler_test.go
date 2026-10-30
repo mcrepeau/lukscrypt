@@ -378,6 +378,7 @@ func TestCreateVaultDuplicateInFlight(t *testing.T) {
 		maxSizeGB:      100,
 		jobs:           make(map[string]*jobEntry),
 		pendingNames:   map[string]struct{}{"myvault": {}}, // simulate in-flight creation
+		pendingPaths:   make(map[string]struct{}),
 		unlockLimiters: make(map[string]*unlockEntry),
 	}
 
@@ -805,6 +806,45 @@ func TestImportVaultPathTaken(t *testing.T) {
 	// The second record must not have been created.
 	if v, err := database.GetVaultByName("second"); err == nil {
 		t.Errorf("vault record was created despite the conflict: %+v", v)
+	}
+}
+
+// An import racing an in-flight create of the same name or image path must be
+// refused with 409: the create goroutine deletes the image on failure, and a
+// record inserted here would become a ghost pointing at a missing file.
+func TestImportVaultConflictsWithInFlightCreate(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return nil, fmt.Errorf("luksDump: not a valid LUKS device")
+	})
+	h := &handler{
+		db:           database,
+		storageDirs:  []string{"/vaults"},
+		mountDirs:    []string{"/mnt"},
+		pendingNames: map[string]struct{}{"myvault": {}},          // simulate in-flight creation
+		pendingPaths: map[string]struct{}{"/vaults/creating.img": {}}, // simulate in-flight creation
+	}
+	call := func(body map[string]any) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/api/vaults/import", bytes.NewReader(b))
+		w := httptest.NewRecorder()
+		h.importVault(w, req)
+		return w
+	}
+	if w := call(map[string]any{"name": "myvault", "path": "/vaults/other.img", "mount_dir": "/mnt"}); w.Code != http.StatusConflict {
+		t.Errorf("name conflict: got %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+	if w := call(map[string]any{"name": "other", "path": "/vaults/creating.img", "mount_dir": "/mnt"}); w.Code != http.StatusConflict {
+		t.Errorf("path conflict: got %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+	// An unrelated import passes the pending checks and fails later at the
+	// LUKS probe (422) — proving it was not blocked by the reservations.
+	if w := call(map[string]any{"name": "other", "path": "/vaults/other.img", "mount_dir": "/mnt"}); w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("unrelated import: got %d, want 422 (past the pending checks); body: %s", w.Code, w.Body.String())
 	}
 }
 

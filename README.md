@@ -421,7 +421,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault with `password` or base64 `key_file` |
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
-| `POST` | `/api/vaults/import` | Yes | Registers an existing image file as a vault (no copy); `409` if the name or path is already registered, `422` if not a LUKS container |
+| `POST` | `/api/vaults/import` | Yes | Registers an existing image file as a vault (no copy); `409` if the name or path is already registered or currently being created, `422` if not a LUKS container |
 | `POST` | `/api/vaults/{id}/grow` | Yes | Grows a mounted vault to `size_gb` (online) with `password` or base64 `key_file`; grow-only, `409` if not mounted |
 | `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |
 | `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Removes a keyslot by index (returns re-read LUKS details); returns `409` if it is the last valid keyslot |

@@ -1,6 +1,10 @@
 // Package api wires up the HTTP router and handlers for the lukscrypt web UI
-// and JSON API. All state-mutating vault operations are serialized through a
-// single mutex to prevent device-mapper races under concurrent requests.
+// and JSON API. State-mutating vault operations serialize on a single mutex
+// (opMu): lock/unlock/grow/keyslot/delete hold it for the whole operation,
+// while the long-running create pipeline runs in a background goroutine and
+// instead reserves its vault name and image path under opMu — so concurrent
+// creates and imports cannot claim the same identity (which would leave a
+// ghost DB record pointing at an image the create's cleanup deleted).
 package api
 
 import (
@@ -57,11 +61,18 @@ type handler struct {
 	trustProxy  bool
 	jobs        map[string]*jobEntry
 	jobsMu      sync.Mutex
-	// opMu serializes vault state-changing operations (lock/unlock/create) to
-	// prevent races on the device-mapper subsystem when multiple requests arrive
-	// in rapid succession.
-	opMu           sync.Mutex
-	pendingNames   map[string]struct{} // names of vaults currently being created
+	// opMu serializes vault state-changing operations to prevent races on the
+	// device-mapper subsystem when multiple requests arrive in rapid
+	// succession. lock/unlock/grow/keyslot/delete hold it for the whole
+	// operation; create holds it only to reserve its identity, because its
+	// pipeline (fallocate/dd + cryptsetup + mkfs) can run for a long time.
+	opMu sync.Mutex
+	// pendingNames/pendingPaths hold the identities of vaults whose creation
+	// goroutine is still running, reserved under opMu. Create and import both
+	// consult them under opMu, so no record can be inserted for a name or
+	// image path that an in-flight create will later clean up.
+	pendingNames   map[string]struct{}
+	pendingPaths   map[string]struct{}
 	unlockLimiters map[string]*unlockEntry
 	unlockMu       sync.Mutex
 	// authLimiters rate-limits failed Basic Auth attempts per client IP, so
@@ -126,6 +137,7 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 		autoLockHours:   autoLockHours,
 		jobs:            make(map[string]*jobEntry),
 		pendingNames:    make(map[string]struct{}),
+		pendingPaths:    make(map[string]struct{}),
 		unlockLimiters:  make(map[string]*unlockEntry),
 		authLimiters:    make(map[string]*unlockEntry),
 		unlockedAt:      make(map[int64]time.Time),
@@ -252,23 +264,30 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 	// Full mount point is always <mount_dir>/<vault_name>.
 	mountPoint := req.MountDir + "/" + req.Name
 
-	// Reserve the name under opMu so a second concurrent create request for
-	// the same name can't race past the "file already exists" check in vault.Create.
+	// Reserve the name and image path under opMu so a concurrent create or
+	// import cannot claim the same identity while this creation is in flight:
+	// the goroutine below deletes the image on failure, and a DB record
+	// pointing at it (e.g. from a racing import) would become a ghost.
+	imgPath := filepath.ToSlash(filepath.Join(req.Path, req.Name+".img"))
 	h.opMu.Lock()
 	if _, inFlight := h.pendingNames[req.Name]; inFlight {
 		h.opMu.Unlock()
 		jsonErr(w, "vault creation already in progress for this name", http.StatusConflict)
 		return
 	}
+	if _, inFlight := h.pendingPaths[imgPath]; inFlight {
+		h.opMu.Unlock()
+		jsonErr(w, "vault creation already in progress for this image path", http.StatusConflict)
+		return
+	}
 	h.pendingNames[req.Name] = struct{}{}
+	h.pendingPaths[imgPath] = struct{}{}
 	h.opMu.Unlock()
 
 	var idBytes [8]byte
 	if _, err := rand.Read(idBytes[:]); err != nil {
 		jsonErr(w, "failed to generate job id", http.StatusInternalServerError)
-		h.opMu.Lock()
-		delete(h.pendingNames, req.Name)
-		h.opMu.Unlock()
+		h.releasePending(req.Name, imgPath)
 		return
 	}
 	jobID := hex.EncodeToString(idBytes[:])
@@ -286,9 +305,7 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 			if r := recover(); r != nil {
 				slog.Error("panic in vault.Create goroutine", "vault", req.Name, "panic", r)
 			}
-			h.opMu.Lock()
-			delete(h.pendingNames, req.Name)
-			h.opMu.Unlock()
+			h.releasePending(req.Name, imgPath)
 		}()
 		vault.Create(h.ctx, h.db, req.Name, req.Path, req.SizeGB, req.Password, mountPoint, ch)
 	}()
@@ -296,6 +313,15 @@ func (h *handler) createVault(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"job_id": jobID})
+}
+
+// releasePending drops the name and image-path reservations of a vault
+// creation that finished (or never started). The caller must not hold opMu.
+func (h *handler) releasePending(name, imgPath string) {
+	h.opMu.Lock()
+	delete(h.pendingNames, name)
+	delete(h.pendingPaths, imgPath)
+	h.opMu.Unlock()
 }
 
 func (h *handler) vaultEvents(w http.ResponseWriter, r *http.Request) {
@@ -644,6 +670,18 @@ func (h *handler) importVault(w http.ResponseWriter, r *http.Request) {
 	// race a concurrent import or create.
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
+	// A creation goroutine may be mid-flight for this name or image path with
+	// no DB record yet. Its failure cleanup deletes the image — registering
+	// it here would leave a ghost record pointing at a missing file. Refuse
+	// while the creation runs.
+	if _, inFlight := h.pendingNames[req.Name]; inFlight {
+		jsonErr(w, "vault creation already in progress for this name", http.StatusConflict)
+		return
+	}
+	if _, inFlight := h.pendingPaths[req.Path]; inFlight {
+		jsonErr(w, "vault creation already in progress for this image path", http.StatusConflict)
+		return
+	}
 	existing, err := h.db.ListVaults()
 	if err != nil {
 		jsonErr(w, "database error", http.StatusInternalServerError)
