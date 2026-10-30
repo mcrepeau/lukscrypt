@@ -1136,10 +1136,13 @@ function renderManageKeySlots(id) {
   const d = detailsCache.get(id);
   if (!d) return;
   const valid = (d.keyslots || []).filter(k => k.status === 'valid' || k.status === 'enabled');
+  // The last valid keyslot cannot be removed (the server enforces it with
+  // 409) — don't even offer the button, there is nothing it could do.
+  const canRemoveAny = valid.length > 1;
   const rows = valid.map(k => `
     <div class="keyslot-row">
       <span class="keyslot-chip">slot ${k.index} &middot; ${esc(k.type)}</span>
-      <button class="btn btn-danger btn-tiny" onclick="showRemoveKeySlot(${id}, ${k.index})">Remove</button>
+      ${canRemoveAny ? `<button class="btn btn-danger btn-tiny" onclick="showRemoveKeySlot(${id}, ${k.index})">Remove</button>` : ''}
     </div>`).join('');
   document.getElementById('keyslot-manage-list').innerHTML =
     rows || '<span style="color:var(--text-dim);font-size:.78rem">No valid keyslots.</span>';
