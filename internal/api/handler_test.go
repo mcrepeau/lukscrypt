@@ -112,6 +112,51 @@ func TestBasicAuth(t *testing.T) {
 	}
 }
 
+// --- Basic Auth rate limiting ---------------------------------------------------
+
+// Failed logins are throttled per IP (burst of 5, then 1/min) so the master
+// AUTH_PASSWORD cannot be brute-forced at unlimited speed via any 401.
+func TestBasicAuthRateLimit(t *testing.T) {
+	h, _ := newTestMux(t)
+	// The burst of 5 failures is allowed through as plain 401s.
+	for i := 0; i < 5; i++ {
+		w := request(h, http.MethodGet, "/api/config", "admin", "wrongpass", "10.9.9.9:1234", nil)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: got %d, want 401", i, w.Code)
+		}
+	}
+	// The 6th failure within the window is throttled.
+	w := request(h, http.MethodGet, "/api/config", "admin", "wrongpass", "10.9.9.9:1234", nil)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("got %d, want 429", w.Code)
+	}
+	if wa := w.Header().Get("WWW-Authenticate"); wa != "" {
+		t.Errorf("429 carries WWW-Authenticate %q — browsers would re-prompt", wa)
+	}
+	// Correct credentials still succeed (auth is checked before the limiter)...
+	w = request(h, http.MethodGet, "/api/config", "admin", "testpass", "10.9.9.9:1234", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("correct creds: got %d, want 200", w.Code)
+	}
+	// ...and reset the counter, so the next failure is a plain 401 again.
+	w = request(h, http.MethodGet, "/api/config", "admin", "wrongpass", "10.9.9.9:1234", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("after successful login: got %d, want 401", w.Code)
+	}
+}
+
+// Each client IP gets its own failure bucket.
+func TestBasicAuthRateLimitPerIP(t *testing.T) {
+	h, _ := newTestMux(t)
+	for i := 0; i < 6; i++ {
+		request(h, http.MethodGet, "/api/config", "admin", "wrongpass", "10.9.9.9:1234", nil)
+	}
+	w := request(h, http.MethodGet, "/api/config", "admin", "wrongpass", "10.8.8.8:1234", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("other IP: got %d, want 401 (own bucket, not 429)", w.Code)
+	}
+}
+
 // --- Security headers ---------------------------------------------------------
 
 func TestSecurityHeaders(t *testing.T) {

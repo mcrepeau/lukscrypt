@@ -531,6 +531,10 @@ When `fallocate` is unavailable the `creating` step emits incremental progress e
   per 30 seconds. This limits brute-force password guessing. `X-Forwarded-For` is only
   honored when `TRUST_PROXY=true` is set (and only the last, proxy-appended entry is
   trusted), so the limit cannot be bypassed with a spoofed header.
+- **Failed logins are rate-limited** per client IP: burst of 5, then one attempt per minute
+  (HTTP `429`). Without this, the master Basic Auth password could be brute-forced at
+  unlimited speed through any endpoint's `401` responses. A successful login resets the
+  counter, and the same `X-Forwarded-For` rules as the unlock limiter apply.
 - **Cross-origin requests are rejected.** State-changing endpoints (POST/DELETE) check the
   browser-sent `Origin` header and refuse cross-site requests, so a malicious web page
   cannot trigger lock/mount/delete actions with the browser's cached Basic Auth

@@ -32,6 +32,7 @@ import (
 )
 
 // unlockEntry pairs a rate limiter with a last-seen timestamp for cleanup.
+// Shared by the unlock and auth-failure limiters.
 type unlockEntry struct {
 	limiter  *rate.Limiter
 	lastSeen time.Time
@@ -63,6 +64,11 @@ type handler struct {
 	pendingNames   map[string]struct{} // names of vaults currently being created
 	unlockLimiters map[string]*unlockEntry
 	unlockMu       sync.Mutex
+	// authLimiters rate-limits failed Basic Auth attempts per client IP, so
+	// the master AUTH_PASSWORD cannot be brute-forced at unlimited speed
+	// through any endpoint's 401 responses.
+	authLimiters map[string]*unlockEntry
+	authMu       sync.Mutex
 	// autoLockHours is the maximum time a vault may stay unlocked; 0 disables
 	// auto-lock. unlockedAt records when each vault was unlocked, so the
 	// auto-lock sweep can enforce the policy. In-memory by design: runtime
@@ -121,6 +127,7 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 		jobs:            make(map[string]*jobEntry),
 		pendingNames:    make(map[string]struct{}),
 		unlockLimiters:  make(map[string]*unlockEntry),
+		authLimiters:    make(map[string]*unlockEntry),
 		unlockedAt:      make(map[int64]time.Time),
 	}
 	go h.cleanupLimiters(ctx)
@@ -1080,23 +1087,27 @@ func (h *handler) cleanupJobs(ctx context.Context) {
 	}
 }
 
-// cleanupLimiters removes rate-limiter entries that have been idle for more
-// than 10 minutes to prevent unbounded memory growth.
+// cleanupLimiters removes rate-limiter entries (unlock and auth-failure) that
+// have been idle for more than 10 minutes to prevent unbounded memory growth.
 func (h *handler) cleanupLimiters(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
+	sweep := func(mu *sync.Mutex, m map[string]*unlockEntry) {
+		mu.Lock()
+		for ip, e := range m {
+			if time.Since(e.lastSeen) > 10*time.Minute {
+				delete(m, ip)
+			}
+		}
+		mu.Unlock()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.unlockMu.Lock()
-			for ip, e := range h.unlockLimiters {
-				if time.Since(e.lastSeen) > 10*time.Minute {
-					delete(h.unlockLimiters, ip)
-				}
-			}
-			h.unlockMu.Unlock()
+			sweep(&h.unlockMu, h.unlockLimiters)
+			sweep(&h.authMu, h.authLimiters)
 		}
 	}
 }
@@ -1239,12 +1250,49 @@ func (h *handler) basicAuth(next http.Handler) http.Handler {
 		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(h.authUser))
 		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(h.authPass))
 		if !ok || userMatch != 1 || passMatch != 1 {
+			// Failed logins are throttled per IP: otherwise the master
+			// AUTH_PASSWORD could be brute-forced at unlimited speed via the
+			// 401s of any endpoint. 429 deliberately omits WWW-Authenticate —
+			// the client is throttled, not unauthorized, so browsers should
+			// not re-prompt.
+			if !h.authAllowed(r) {
+				jsonErr(w, "too many failed login attempts — wait before trying again", http.StatusTooManyRequests)
+				return
+			}
 			w.Header().Set("WWW-Authenticate", `Basic realm="lukscrypt"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// A successful login resets this IP's failure counter, so a user who
+		// typo'd a few times is not locked out later.
+		h.clearAuthFailures(r)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// authAllowed consumes a failure token for the request's IP: burst of 5, then
+// one attempt per minute. Only failures are counted — successful logins never
+// touch the limiter (they reset it instead).
+func (h *handler) authAllowed(r *http.Request) bool {
+	ip := clientIP(r, h.trustProxy)
+	h.authMu.Lock()
+	defer h.authMu.Unlock()
+	e, ok := h.authLimiters[ip]
+	if !ok {
+		e = &unlockEntry{limiter: rate.NewLimiter(rate.Every(time.Minute), 5)}
+		h.authLimiters[ip] = e
+	}
+	e.lastSeen = time.Now()
+	return e.limiter.Allow()
+}
+
+// clearAuthFailures drops the failure entry for the request's IP after a
+// successful login.
+func (h *handler) clearAuthFailures(r *http.Request) {
+	ip := clientIP(r, h.trustProxy)
+	h.authMu.Lock()
+	delete(h.authLimiters, ip)
+	h.authMu.Unlock()
 }
 
 func isValidVaultName(s string) bool {
