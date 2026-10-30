@@ -41,11 +41,20 @@ func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int,
 		default:
 		}
 	}
-	fail := func(context string, err error) {
+	// sendTerminal delivers the final event (done or error). Unlike progress
+	// sends it blocks: a slow SSE reader must not lose the terminal event and
+	// end up showing "Connection lost" for a successful creation. It still
+	// escapes on shutdown, or if no reader ever connected and the buffer is
+	// full of unread progress events.
+	sendTerminal := func(ev ProgressEvent) {
 		select {
-		case ch <- ProgressEvent{Error: fmt.Sprintf("%s: %v", context, err)}:
-		default:
+		case ch <- ev:
+		case <-ctx.Done():
+		case <-time.After(time.Minute):
 		}
+	}
+	fail := func(context string, err error) {
+		sendTerminal(ProgressEvent{Error: fmt.Sprintf("%s: %v", context, err)})
 	}
 
 	imgPath := filepath.Join(path, name+".img")
@@ -157,16 +166,13 @@ func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int,
 		return
 	}
 
-	select {
-	case ch <- ProgressEvent{
+	sendTerminal(ProgressEvent{
 		Step:    "done",
 		Message: "Vault created and mounted successfully!",
 		Percent: 100,
 		Done:    true,
 		VaultID: vault.ID,
-	}:
-	default:
-	}
+	})
 }
 
 // allocateFile creates the backing image file. It first attempts fallocate,
@@ -241,7 +247,15 @@ func createFile(ctx context.Context, imgPath string, sizeGB int, ch chan<- Progr
 
 // Unlock opens a LUKS device and mounts it at the vault's configured mount point.
 func Unlock(v *db.Vault, password string) error {
-	return unlockWith(v, strings.NewReader(password))
+	return UnlockContext(context.Background(), v, password)
+}
+
+// UnlockContext is Unlock bounded by ctx: the cryptsetup and mount
+// subprocesses are interrupted (SIGKILL) if ctx is cancelled or times out, so
+// an in-flight unlock cannot stall the HTTP drain on shutdown. The cleanup
+// luksClose still runs unconditionally (it must, to not leak the mapper).
+func UnlockContext(ctx context.Context, v *db.Vault, password string) error {
+	return unlockWith(ctx, v, strings.NewReader(password))
 }
 
 // UnlockKeyFile opens the LUKS device using raw keyfile bytes as the
@@ -250,20 +264,25 @@ func Unlock(v *db.Vault, password string) error {
 // binary content (including embedded newlines) is used verbatim and a
 // truncated read fails instead of silently becoming a shorter credential.
 func UnlockKeyFile(v *db.Vault, key []byte) error {
-	return unlockWith(v, bytes.NewReader(key),
+	return UnlockKeyFileContext(context.Background(), v, key)
+}
+
+// UnlockKeyFileContext is UnlockKeyFile bounded by ctx (see UnlockContext).
+func UnlockKeyFileContext(ctx context.Context, v *db.Vault, key []byte) error {
+	return unlockWith(ctx, v, bytes.NewReader(key),
 		"--key-file=-", "--keyfile-size="+strconv.Itoa(len(key)))
 }
 
 // unlockWith is the shared unlock path: extraArgs are cryptsetup options
 // inserted before the device path, and stdin carries the credential.
-func unlockWith(v *db.Vault, stdin io.Reader, extraArgs ...string) error {
+func unlockWith(ctx context.Context, v *db.Vault, stdin io.Reader, extraArgs ...string) error {
 	if IsUnlocked(v) {
 		return fmt.Errorf("vault is already unlocked")
 	}
 
 	args := append([]string{"luksOpen"}, extraArgs...)
 	args = append(args, v.Path, v.MapperName)
-	cmd := exec.Command("cryptsetup", args...)
+	cmd := exec.CommandContext(ctx, "cryptsetup", args...)
 	cmd.Stdin = stdin
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("luksOpen: %s", strings.TrimSpace(string(out)))
@@ -274,7 +293,7 @@ func unlockWith(v *db.Vault, stdin io.Reader, extraArgs ...string) error {
 		return fmt.Errorf("create mount point: %w", err)
 	}
 
-	cmd = exec.Command("mount", "/dev/mapper/"+v.MapperName, v.MountPoint)
+	cmd = exec.CommandContext(ctx, "mount", "/dev/mapper/"+v.MapperName, v.MountPoint)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		exec.Command("cryptsetup", "luksClose", v.MapperName).Run()
 		return fmt.Errorf("mount: %s", strings.TrimSpace(string(out)))

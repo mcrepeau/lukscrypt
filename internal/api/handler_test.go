@@ -508,6 +508,59 @@ func TestCreateVaultFailureDoesNotStartAutoLockWindow(t *testing.T) {
 	}
 }
 
+// Oversized request bodies are rejected with 400 instead of being read into
+// memory without bound (MaxBytesReader). The 8 MiB cap leaves keyfile
+// uploads (≤ ~1.4 MB on the wire) plenty of headroom.
+func TestBodySizeLimit(t *testing.T) {
+	h, _ := newTestMux(t)
+	big := with(validCreateBody(), "password", strings.Repeat("x", maxBodyBytes))
+	w := auth(h, http.MethodPost, "/api/vaults", big)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid request body") {
+		t.Errorf("oversized body: got %d, body %q — want 400 invalid request body", w.Code, w.Body.String())
+	}
+	// A normal-sized body still reaches validation (400 here is the password
+	// rule, proving the decode succeeded).
+	w = auth(h, http.MethodPost, "/api/vaults", with(validCreateBody(), "password", "short"))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "password must be at least 8") {
+		t.Errorf("small body: got %d, body %q — want 400 password rule (decode succeeded)", w.Code, w.Body.String())
+	}
+}
+
+// When the SSE client disconnects mid-creation, the handler keeps draining the
+// job channel until the creation goroutine closes it — so the goroutine's
+// blocking terminal send never stalls on a full buffer.
+func TestVaultEventsDrainsAfterDisconnect(t *testing.T) {
+	ch := make(chan vault.ProgressEvent, 4)
+	h := &handler{
+		jobs: map[string]*jobEntry{"job1": {ch: ch, created: time.Now()}},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/vaults/events/job1", nil)
+	req.SetPathValue("jobID", "job1") // direct call bypasses the mux's pattern matching
+	ctx, cancel := context.WithCancel(context.Background())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() { h.vaultEvents(w, req); close(done) }()
+
+	ch <- vault.ProgressEvent{Step: "creating", Percent: 10}
+	cancel() // client disconnects
+	// Feed the terminal event and close: the handler must drain and return.
+	ch <- vault.ProgressEvent{Step: "done", Done: true, Percent: 100}
+	close(ch)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("vaultEvents did not return after the job channel closed")
+	}
+	h.jobsMu.Lock()
+	_, stillThere := h.jobs["job1"]
+	h.jobsMu.Unlock()
+	if stillThere {
+		t.Error("job entry was not removed after client disconnect")
+	}
+}
+
 // --- DELETE /api/vaults/{id} -------------------------------------------------
 
 func TestDeleteVaultNotFound(t *testing.T) {
@@ -1487,7 +1540,7 @@ func TestUnlockLockBookkeeping(t *testing.T) {
 		unlockedAt:    make(map[int64]time.Time),
 	}
 	origUnlock, origLock := vaultUnlock, vaultLock
-	vaultUnlock = func(*db.Vault, string) error { return nil }
+	vaultUnlock = func(context.Context, *db.Vault, string) error { return nil }
 	vaultLock = func(*db.Vault) error { return nil }
 	t.Cleanup(func() { vaultUnlock, vaultLock = origUnlock, origLock })
 
@@ -1671,7 +1724,7 @@ func TestKeyslotAddRateLimit(t *testing.T) {
 // b64 returns the base64 of s, for keyfile bodies.
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
-func stubKeyfileOps(t *testing.T, unlockKey func(*db.Vault, []byte) error, addKeyFile func(*db.Vault, []byte, []byte, int) error) {
+func stubKeyfileOps(t *testing.T, unlockKey func(context.Context, *db.Vault, []byte) error, addKeyFile func(*db.Vault, []byte, []byte, int) error) {
 	t.Helper()
 	origUnlock, origAdd := vaultUnlockKeyFile, vaultAddKeyFile
 	vaultUnlockKeyFile, vaultAddKeyFile = unlockKey, addKeyFile
@@ -1686,7 +1739,7 @@ func TestUnlockWithKeyFile(t *testing.T) {
 	}
 	var gotKey []byte
 	stubKeyfileOps(t,
-		func(_ *db.Vault, key []byte) error {
+		func(_ context.Context, _ *db.Vault, key []byte) error {
 			gotKey = key
 			return nil
 		},

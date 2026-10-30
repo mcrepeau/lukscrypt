@@ -176,7 +176,7 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 
-	authenticated := h.requestLogger(h.securityHeaders(h.csrfGuard(h.basicAuth(mux))))
+	authenticated := h.requestLogger(h.securityHeaders(h.csrfGuard(h.limitBody(h.basicAuth(mux)))))
 
 	// /healthz is unauthenticated so container orchestrators can probe it without credentials.
 	top := http.NewServeMux()
@@ -361,11 +361,14 @@ func (h *handler) vaultEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			// Client disconnected. Remove the job entry so the map doesn't
-			// grow unbounded; the creation goroutine uses non-blocking sends
-			// so it will finish regardless of whether anyone is reading.
+			// grow unbounded, but keep draining ch until the creation
+			// goroutine closes it: the goroutine's terminal send blocks, and
+			// without a drainer it would stall on a full buffer.
 			h.jobsMu.Lock()
 			delete(h.jobs, jobID)
 			h.jobsMu.Unlock()
+			for range ch {
+			}
 			return
 		case event, open := <-ch:
 			if !open {
@@ -426,11 +429,11 @@ func (h *handler) unlockVault(w http.ResponseWriter, r *http.Request) {
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
 	if req.KeyFile != "" {
-		if err := vaultUnlockKeyFile(v, key); err != nil {
+		if err := vaultUnlockKeyFile(h.ctx, v, key); err != nil {
 			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
-	} else if err := vaultUnlock(v, req.Password); err != nil {
+	} else if err := vaultUnlock(h.ctx, v, req.Password); err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
@@ -1196,6 +1199,21 @@ func clientIP(r *http.Request, trustProxy bool) string {
 	return ip
 }
 
+// maxBodyBytes caps request bodies. Keyfile uploads are base64 of at most
+// 1 MiB (≈1.4 MB on the wire), so 8 MiB leaves generous headroom while
+// bounding how much memory a single request can make the server allocate.
+const maxBodyBytes = 8 << 20
+
+// limitBody wraps r.Body in a MaxBytesReader: an oversized body then fails the
+// JSON decode with 400 instead of being read into memory without bound. It
+// sits outside basicAuth so the cap applies even to unauthenticated requests.
+func (h *handler) limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requestLogger logs method, path, status, and duration for every request.
 func (h *handler) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1275,9 +1293,11 @@ var (
 )
 
 // vaultUnlock, vaultUnlockKeyFile and vaultAddKeyFile follow the same pattern.
+// The unlock variants take a context so an in-flight unlock is interrupted on
+// shutdown instead of stalling the HTTP drain.
 var (
-	vaultUnlock        = vault.Unlock
-	vaultUnlockKeyFile = vault.UnlockKeyFile
+	vaultUnlock        = vault.UnlockContext
+	vaultUnlockKeyFile = vault.UnlockKeyFileContext
 	vaultAddKeyFile    = vault.AddKeyFile
 )
 
