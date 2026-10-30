@@ -112,17 +112,20 @@ func (d *DB) GetVault(id int64) (*Vault, error) {
 	return &v, nil
 }
 
-func (d *DB) DeleteVault(id int64) error {
-	_, err := d.conn.Exec(`DELETE FROM vaults WHERE id = ?`, id)
-	return err
+// GetVaultByName resolves a vault by its unique name.
+func (d *DB) GetVaultByName(name string) (*Vault, error) {
+	var v Vault
+	err := d.conn.QueryRow(
+		`SELECT id, name, path, size_gb, mount_point, mapper_name, created_at FROM vaults WHERE name = ?`, name,
+	).Scan(&v.ID, &v.Name, &v.Path, &v.SizeGB, &v.MountPoint, &v.MapperName, &v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
-// UpdateVaultPaths changes the image path and mount point of a vault. Vault
-// name and mapper name are immutable (they define the mount convention and
-// device-mapper name); only where the image lives and where it mounts may
-// be edited, after the operator has moved the image file themselves.
-func (d *DB) UpdateVaultPaths(id int64, path, mountPoint string) error {
-	_, err := d.conn.Exec(`UPDATE vaults SET path = ?, mount_point = ? WHERE id = ?`, path, mountPoint, id)
+func (d *DB) DeleteVault(id int64) error {
+	_, err := d.conn.Exec(`DELETE FROM vaults WHERE id = ?`, id)
 	return err
 }
 

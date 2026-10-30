@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,11 +124,8 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	// Vault CRUD
 	mux.HandleFunc("GET /api/vaults", h.listVaults)
 	mux.HandleFunc("POST /api/vaults", h.createVault)
+	mux.HandleFunc("POST /api/vaults/import", h.importVault)
 	mux.HandleFunc("DELETE /api/vaults/{id}", h.deleteVault)
-	// Path editing: the operator may move/copy image files server-side; this
-	// reconciles the database record afterwards. PUT only — it changes where
-	// the vault lives, not the vault data itself.
-	mux.HandleFunc("PUT /api/vaults/{id}", h.updateVaultPaths)
 	// Actions
 	mux.HandleFunc("POST /api/vaults/{id}/unlock", h.unlockVault)
 	mux.HandleFunc("POST /api/vaults/{id}/lock", h.lockVault)
@@ -575,18 +573,15 @@ func (h *handler) keyslotRemove(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
-// updateVaultPaths edits the image path and/or mount directory of a locked
-// vault. The operator is trusted to move or copy image files themselves
-// (server-side, outside the app); this endpoint exists to reconcile the
-// database record afterwards. The new path must live inside an allowlisted
-// storage directory and must be a readable LUKS container.
-func (h *handler) updateVaultPaths(w http.ResponseWriter, r *http.Request) {
-	id, err := parseID(r)
-	if err != nil {
-		jsonErr(w, "invalid vault id", http.StatusBadRequest)
-		return
-	}
+// importVault registers an existing image file as a vault. Nothing is
+// created or copied: the operator has already placed the image inside an
+// allowlisted storage directory (moved it, restored it from a backup, or is
+// recovering records after a lost database). The image is validated as a
+// readable LUKS container before the record is created, and its size is
+// derived from the file — the image is the truth.
+func (h *handler) importVault(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		Name     string `json:"name"`
 		Path     string `json:"path"`
 		MountDir string `json:"mount_dir"`
 	}
@@ -594,58 +589,71 @@ func (h *handler) updateVaultPaths(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.Path == "" && req.MountDir == "" {
-		jsonErr(w, "nothing to update — provide path and/or mount_dir", http.StatusBadRequest)
+	if req.Name == "" || req.Path == "" || req.MountDir == "" {
+		jsonErr(w, "name, path and mount_dir are required", http.StatusBadRequest)
 		return
 	}
-	if req.Path != "" && !h.pathInStorageDir(req.Path) {
+	if !isValidVaultName(req.Name) {
+		jsonErr(w, "vault name may only contain lowercase letters, numbers, and hyphens (max 64 chars)", http.StatusBadRequest)
+		return
+	}
+	if !h.pathInStorageDir(req.Path) {
 		jsonErr(w, "path is not inside an allowed storage directory", http.StatusBadRequest)
 		return
 	}
-	if req.MountDir != "" && !h.allowedMountDir(req.MountDir) {
+	if !h.allowedMountDir(req.MountDir) {
 		jsonErr(w, "mount directory not allowed", http.StatusBadRequest)
 		return
 	}
-	v, ok := h.lookupVault(w, id)
-	if !ok {
-		return
-	}
+
+	// opMu holds through check-and-insert so the uniqueness checks cannot
+	// race a concurrent import or create.
 	h.opMu.Lock()
 	defer h.opMu.Unlock()
-	// Must be fully locked: while unlocked, the kernel's dm/loop device holds
-	// the old path open — a record updated then would desync from reality.
-	if vaultIsUnlocked(v) {
-		jsonErr(w, "vault must be locked before editing its path", http.StatusConflict)
-		return
-	}
-	if req.Path != "" {
-		// Validate the image exists and is a LUKS container before touching
-		// the record, so the DB never points at a file that can't unlock.
-		probe := *v
-		probe.Path = req.Path
-		if _, err := vaultDumpDetails(&probe); err != nil {
-			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
-			return
-		}
-	}
-	newPath := v.Path
-	if req.Path != "" {
-		newPath = req.Path
-	}
-	newMountPoint := v.MountPoint
-	if req.MountDir != "" {
-		newMountPoint = req.MountDir + "/" + v.Name
-	}
-	if err := h.db.UpdateVaultPaths(id, newPath, newMountPoint); err != nil {
-		jsonErr(w, "failed to update vault record", http.StatusInternalServerError)
-		return
-	}
-	updated, err := h.db.GetVault(id)
+	existing, err := h.db.ListVaults()
 	if err != nil {
 		jsonErr(w, "database error", http.StatusInternalServerError)
 		return
 	}
-	jsonOK(w, toResponse(*updated, vault.ReadMounts()))
+	for _, v := range existing {
+		if v.Name == req.Name {
+			jsonErr(w, "a vault with this name already exists", http.StatusConflict)
+			return
+		}
+		if v.Path == req.Path {
+			jsonErr(w, fmt.Sprintf("this image is already registered to vault %q", v.Name), http.StatusConflict)
+			return
+		}
+	}
+	// Refuse a stale mapper device with the same name (e.g. left over from
+	// a crash) — luksOpen would otherwise fail confusingly at unlock time.
+	if _, err := os.Stat("/dev/mapper/" + req.Name); err == nil {
+		jsonErr(w, "/dev/mapper/"+req.Name+" already exists — close it first or choose a different vault name", http.StatusConflict)
+		return
+	}
+	// The image must be a readable LUKS container before the record exists.
+	probe := db.Vault{Name: req.Name, Path: req.Path, MapperName: req.Name}
+	if _, err := vaultDumpDetails(&probe); err != nil {
+		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	info, err := os.Stat(req.Path)
+	if err != nil {
+		jsonErr(w, "image file is not readable: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	// Ceil to GB so the displayed size never understates the file; grow's
+	// delta math then stays conservative.
+	sizeGB := int((info.Size() + (1 << 30) - 1) / (1 << 30))
+	mountPoint := req.MountDir + "/" + req.Name
+	v, err := h.db.CreateVault(req.Name, req.Path, sizeGB, mountPoint, req.Name)
+	if err != nil {
+		jsonErr(w, "failed to register vault", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(toResponse(*v, vault.ReadMounts()))
 }
 
 // growVault extends a vault's image, LUKS device and ext4 filesystem.

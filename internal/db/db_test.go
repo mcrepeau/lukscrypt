@@ -47,28 +47,6 @@ func TestCreateVaultDuplicateName(t *testing.T) {
 	}
 }
 
-func TestUpdateVaultPaths(t *testing.T) {
-	d := newTestDB(t)
-	v, err := d.CreateVault("test", "/vaults/test.img", 5, "/mnt/test", "test")
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := d.UpdateVaultPaths(v.ID, "/tank/test.img", "/srv/test"); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	got, err := d.GetVault(v.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Path != "/tank/test.img" || got.MountPoint != "/srv/test" {
-		t.Errorf("vault = %+v, want updated paths", got)
-	}
-	// Name and mapper name must be untouched by the path update.
-	if got.Name != "test" || got.MapperName != "test" {
-		t.Errorf("name/mapper changed: %+v", got)
-	}
-}
-
 func TestDeleteVault(t *testing.T) {
 	d := newTestDB(t)
 	v, err := d.CreateVault("test", "/vaults/test.img", 5, "/mnt/test", "test")

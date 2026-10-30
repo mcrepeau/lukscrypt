@@ -16,7 +16,7 @@ Designed to run as a privileged Docker container on a NAS (tested on Debian 12 /
 - HTTP Basic Auth — a random password is generated on first start if none is configured
 - Vault metadata persisted in SQLite (WAL mode); runtime state derived live from the OS
 - Configurable storage and mount base directories via environment variables
-- Edit a locked vault's registered image path and mount location — after moving or restoring image files server-side, reconcile the record instead of deleting and recreating the vault
+- Import an existing vault image — register an image placed in a storage directory (moved file, restored backup, or lost-database recovery); records never mutate their identity
 - Grow a mounted vault online (image + LUKS device + filesystem) — grow-only by design; vaults cannot be shrunk
 - Mounts propagate to the host via shared bind-mount so SMB shares see the vault contents
 - Concurrent lock/unlock/create operations serialized to prevent device-mapper races
@@ -278,25 +278,28 @@ For example, a vault named `private` with mount dir `/mnt` mounts at `/mnt/priva
 
 ## Vault lifecycle
 
-### Moving vault images
+### Moving and importing vault images
 
 Vault image files are self-contained (LUKS header + encrypted data), so they can be
 moved or backed up with any server-side tool (`cp`, `rsync`, restic, btrfs snapshots —
-ideally while the vault is locked). After moving a file, update the record so the
-vault still unlocks:
+ideally while the vault is locked). There is no path-editing API: records are immutable
+in their identity fields. To move a vault, copy the image, delete the old vault in the
+UI (which removes the old image and record), then import the copy:
 
 ```json
-PUT /api/vaults/1
-{ "path": "/srv/tank/private.img", "mount_dir": "/mnt" }
+POST /api/vaults/import
+{ "name": "private", "path": "/vaults/private.img", "mount_dir": "/mnt" }
 ```
 
-The vault must be locked, the new path must live inside an allowlisted storage
-directory, and the server verifies it is a readable LUKS container before updating
-the record. Vault name and mount point convention stay as they were.
+Import registers an existing image file — nothing is created or copied. The image must
+live inside an allowlisted storage directory and be a readable LUKS container (validated
+before the record is created); its size is derived from the file. A path already
+registered to another vault is refused with `409` — two mapper names over one image
+would corrupt data. Import is also the recovery path after a lost database: register
+each surviving image and the vaults are back.
 
-**Back up your database volume.** Reimporting lost records is not supported: `/data`
-is a single small SQLite file, so copying it off the NAS is trivial and makes
-restoring a matter of putting the images back where the record expects them.
+**Back up your database volume anyway** (`/data` is a single small SQLite file) —
+import makes its loss recoverable, but back when you still remember which image is which.
 
 ### Growing a vault
 
@@ -361,7 +364,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/unlock` | Yes | Unlocks and mounts a vault with `password` or base64 `key_file` |
 | `POST` | `/api/vaults/{id}/lock` | Yes | Unmounts and locks a vault |
 | `POST` | `/api/vaults/{id}/mount` | Yes | Re-mounts an already-unlocked vault |
-| `PUT` | `/api/vaults/{id}` | Yes | Updates the image `path` and/or `mount_dir` of a locked vault; `409` if unlocked, `422` if the new path is not a LUKS container |
+| `POST` | `/api/vaults/import` | Yes | Registers an existing image file as a vault (no copy); `409` if the name or path is already registered, `422` if not a LUKS container |
 | `POST` | `/api/vaults/{id}/grow` | Yes | Grows a mounted vault to `size_gb` (online); grow-only, `409` if not mounted |
 | `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |
 | `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Removes a keyslot by index (returns re-read LUKS details); returns `409` if it is the last valid keyslot |

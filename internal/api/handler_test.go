@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -682,27 +684,38 @@ func TestVaultDetailsDumpFailure(t *testing.T) {
 	}
 }
 
-// --- PUT /api/vaults/{id} (path editing) ---------------------------------------
+// --- POST /api/vaults/import ----------------------------------------------------
 
-func TestUpdateVaultPathsValidation(t *testing.T) {
-	h, database := newTestMux(t)
-	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+// newTestMuxWithDirs builds a mux with custom allowlists, for import tests
+// that need the storage dir to point at a real temporary directory.
+func newTestMuxWithDirs(t *testing.T, storageDirs, mountDirs []string) (http.Handler, *db.DB) {
+	t.Helper()
+	database, err := db.Open(":memory:")
 	if err != nil {
-		t.Fatalf("seed vault: %v", err)
+		t.Fatalf("open db: %v", err)
 	}
-	path := fmt.Sprintf("/api/vaults/%d", v.ID)
+	t.Cleanup(func() { database.Close() })
+	h := NewMux(context.Background(), database, embed.FS{}, storageDirs, mountDirs, "admin", "testpass", 100, false, "test")
+	return h, database
+}
+
+func TestImportVaultValidation(t *testing.T) {
+	h, _ := newTestMux(t)
 	tests := []struct {
 		name string
 		body map[string]any
 	}{
-		{"nothing to update", map[string]any{}},
-		{"path outside storage dirs", map[string]any{"path": "/etc/testvault.img"}},
-		{"path in sibling dir with shared prefix", map[string]any{"path": "/vaults2/testvault.img"}},
-		{"mount dir not allowed", map[string]any{"path": "/vaults/testvault.img", "mount_dir": "/tmp"}},
+		{"missing name", map[string]any{"path": "/vaults/x.img", "mount_dir": "/mnt"}},
+		{"missing path", map[string]any{"name": "x", "mount_dir": "/mnt"}},
+		{"missing mount_dir", map[string]any{"name": "x", "path": "/vaults/x.img"}},
+		{"invalid name", map[string]any{"name": "BadName", "path": "/vaults/x.img", "mount_dir": "/mnt"}},
+		{"path outside storage dirs", map[string]any{"name": "x", "path": "/etc/x.img", "mount_dir": "/mnt"}},
+		{"path in sibling dir with shared prefix", map[string]any{"name": "x", "path": "/vaults2/x.img", "mount_dir": "/mnt"}},
+		{"mount dir not allowed", map[string]any{"name": "x", "path": "/vaults/x.img", "mount_dir": "/tmp"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := request(h, http.MethodPut, path, "admin", "testpass", "10.8.8.8:8", tt.body)
+			w := request(h, http.MethodPost, "/api/vaults/import", "admin", "testpass", "10.6.6.6:6", tt.body)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
 			}
@@ -710,93 +723,89 @@ func TestUpdateVaultPathsValidation(t *testing.T) {
 	}
 }
 
-func TestUpdateVaultPathsNotFound(t *testing.T) {
-	h, _ := newTestMux(t)
-	w := auth(h, http.MethodPut, "/api/vaults/99999", map[string]any{"path": "/vaults/x.img"})
-	if w.Code != http.StatusNotFound {
-		t.Errorf("got %d, want 404", w.Code)
-	}
-}
-
-func TestUpdateVaultPathsUnlocked(t *testing.T) {
+func TestImportVaultNameTaken(t *testing.T) {
 	h, database := newTestMux(t)
-	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
-	if err != nil {
-		t.Fatalf("seed vault: %v", err)
+	if _, err := database.CreateVault("taken", "/vaults/taken.img", 5, "/mnt/taken", "taken"); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
 	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
 		return &vault.LUKSDetails{Version: "2"}, nil
 	})
-	orig := vaultIsUnlocked
-	vaultIsUnlocked = func(*db.Vault) bool { return true }
-	t.Cleanup(func() { vaultIsUnlocked = orig })
-
-	w := auth(h, http.MethodPut, fmt.Sprintf("/api/vaults/%d", v.ID), map[string]any{"path": "/vaults/moved.img"})
+	w := auth(h, http.MethodPost, "/api/vaults/import",
+		map[string]any{"name": "taken", "path": "/vaults/other.img", "mount_dir": "/mnt"})
 	if w.Code != http.StatusConflict {
-		t.Errorf("got %d, want 409", w.Code)
-	}
-	got, err := database.GetVault(v.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Path != "/vaults/testvault.img" {
-		t.Errorf("record was updated despite unlocked vault: %+v", got)
+		t.Errorf("got %d, want 409; body: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestUpdateVaultPathsNotLuks(t *testing.T) {
+// The same image file must never be registered twice: two mapper names over
+// one underlying file is a data-corruption scenario.
+func TestImportVaultPathTaken(t *testing.T) {
 	h, database := newTestMux(t)
-	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
-	if err != nil {
-		t.Fatalf("seed vault: %v", err)
+	if _, err := database.CreateVault("first", "/vaults/first.img", 5, "/mnt/first", "first"); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
 	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
-		return nil, fmt.Errorf("luksDump: Device /vaults/moved.img is not a valid LUKS device")
+		return &vault.LUKSDetails{Version: "2"}, nil
 	})
-	w := auth(h, http.MethodPut, fmt.Sprintf("/api/vaults/%d", v.ID), map[string]any{"path": "/vaults/moved.img"})
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Errorf("got %d, want 422", w.Code)
+	w := auth(h, http.MethodPost, "/api/vaults/import",
+		map[string]any{"name": "second", "path": "/vaults/first.img", "mount_dir": "/mnt"})
+	if w.Code != http.StatusConflict {
+		t.Errorf("got %d, want 409; body: %s", w.Code, w.Body.String())
 	}
-	got, err := database.GetVault(v.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Path != "/vaults/testvault.img" {
-		t.Errorf("record updated despite invalid image: %+v", got)
+	// The second record must not have been created.
+	if v, err := database.GetVaultByName("second"); err == nil {
+		t.Errorf("vault record was created despite the conflict: %+v", v)
 	}
 }
 
-func TestUpdateVaultPathsSuccess(t *testing.T) {
-	h, database := newTestMux(t)
-	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
-	if err != nil {
-		t.Fatalf("seed vault: %v", err)
-	}
-	var probedPath string
-	stubDumpDetails(t, func(vv *db.Vault) (*vault.LUKSDetails, error) {
-		probedPath = vv.Path
-		return &vault.LUKSDetails{Version: "2", UUID: "abc"}, nil
+func TestImportVaultNotLuks(t *testing.T) {
+	h, _ := newTestMux(t)
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return nil, fmt.Errorf("luksDump: Device /vaults/x.img is not a valid LUKS device")
 	})
-	w := auth(h, http.MethodPut, fmt.Sprintf("/api/vaults/%d", v.ID),
-		map[string]any{"path": "/vaults/moved.img", "mount_dir": "/mnt"})
-	if w.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	w := auth(h, http.MethodPost, "/api/vaults/import",
+		map[string]any{"name": "x", "path": "/vaults/x.img", "mount_dir": "/mnt"})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("got %d, want 422; body: %s", w.Code, w.Body.String())
 	}
-	if probedPath != "/vaults/moved.img" {
-		t.Errorf("dump probed %q, want the new path", probedPath)
+}
+
+func TestImportVaultSuccess(t *testing.T) {
+	// ToSlash: pathInStorageDir compares forward-slash prefixes, and the
+	// storage dirs on Linux are always forward-slash paths.
+	dir := filepath.ToSlash(t.TempDir())
+	img := dir + "/restored.img"
+	// A sparse 3 GiB file stands in for a real vault image; the size is
+	// derived from the file, so the record must report 3 GB.
+	if err := os.WriteFile(img, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Truncate(img, 3<<30); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	h, database := newTestMuxWithDirs(t, []string{dir}, []string{"/mnt"})
+	stubDumpDetails(t, func(*db.Vault) (*vault.LUKSDetails, error) {
+		return &vault.LUKSDetails{Version: "2", UUID: "some-uuid"}, nil
+	})
+
+	w := auth(h, http.MethodPost, "/api/vaults/import",
+		map[string]any{"name": "restored", "path": img, "mount_dir": "/mnt"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("got %d, want 201; body: %s", w.Code, w.Body.String())
 	}
 	var resp vaultResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Path != "/vaults/moved.img" || resp.MountPoint != "/mnt/testvault" {
-		t.Errorf("response = %+v, want updated paths", resp)
+	if resp.Name != "restored" || resp.SizeGB != 3 || resp.MountPoint != "/mnt/restored" {
+		t.Errorf("response = %+v", resp)
 	}
-	got, err := database.GetVault(v.ID)
+	got, err := database.GetVaultByName("restored")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Path != "/vaults/moved.img" || got.Name != "testvault" {
+	if got.Path != img || got.SizeGB != 3 {
 		t.Errorf("db record = %+v", got)
 	}
 }
