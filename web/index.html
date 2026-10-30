@@ -79,6 +79,11 @@
     font-weight: 600;
     color: var(--text-muted);
   }
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
   #vault-count { color: var(--text-dim); font-weight: 400; margin-left: 6px; }
 
   /* ── Buttons ── */
@@ -493,18 +498,20 @@
     <div class="toolbar-title">
       Vaults <span id="vault-count"></span>
     </div>
-    <button class="btn btn-ghost" onclick="openImportModal()">
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-        <path d="M6 1v10"/><path d="M2 5l4-4 4 4"/><path d="M2 11h8"/>
-      </svg>
-      Import
-    </button>
-    <button class="btn btn-primary" onclick="openCreateModal()">
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-        <line x1="6" y1="1" x2="6" y2="11"/><line x1="1" y1="6" x2="11" y2="6"/>
-      </svg>
-      New Vault
-    </button>
+    <div class="toolbar-actions">
+      <button class="btn btn-ghost" onclick="openImportModal()">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <path d="M6 1v10"/><path d="M2 5l4-4 4 4"/><path d="M2 11h8"/>
+        </svg>
+        Import Vault
+      </button>
+      <button class="btn btn-primary" onclick="openCreateModal()">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <line x1="6" y1="1" x2="6" y2="11"/><line x1="1" y1="6" x2="11" y2="6"/>
+        </svg>
+        New Vault
+      </button>
+    </div>
   </div>
   <div id="vaults-grid"></div>
 </main>
