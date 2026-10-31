@@ -927,7 +927,6 @@
     </p>
     <div id="new-token-box" style="display:none;margin-bottom:1rem;padding:.75rem;background:var(--surface);border:1px solid var(--primary);border-radius:7px">
       <div style="font-family:var(--mono);font-size:.75rem;word-break:break-all" id="new-token-value"></div>
-      <button type="button" class="btn btn-ghost btn-tiny" style="margin-top:.5rem" onclick="copyNewToken()">Copy</button>
     </div>
     <div id="tokens-list" style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:1.25rem"></div>
     <div class="form-group" style="display:flex;gap:.5rem;align-items:flex-end;margin-bottom:0">
@@ -1786,13 +1785,6 @@ async function submitCreateToken() {
   }
   btn.disabled = false;
   btn.textContent = 'Create';
-}
-
-function copyNewToken() {
-  const v = document.getElementById('new-token-value').textContent;
-  navigator.clipboard.writeText(v)
-    .then(() => toast('Copied.', 'success'))
-    .catch(() => toast('Copy failed — select and copy manually', 'error'));
 }
 
 async function revokeToken(id, name) {
