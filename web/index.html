@@ -120,16 +120,44 @@
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 1.25rem;
-    display: flex;
-    flex-direction: column;
-    gap: .9rem;
     transition: border-color .2s, box-shadow .2s;
+    perspective: 1200px; /* for the details flip */
   }
   .vault-card:hover { border-color: #3a3a5a; box-shadow: var(--shadow); }
   .vault-card.mounted  { border-left: 3px solid var(--success); }
   .vault-card.unlocked { border-left: 3px solid var(--warning); }
   .vault-card.locked   { border-left: 3px solid var(--border); }
+
+  /* ── 3D flip: Details flips the card instead of growing it, so sibling
+     cards in the same grid row keep their height ── */
+  .vault-card-inner {
+    position: relative;
+    height: 100%;
+    transform-style: preserve-3d;
+    transition: transform .45s cubic-bezier(.4,.1,.2,1);
+  }
+  .vault-card.flipped .vault-card-inner { transform: rotateY(180deg); }
+  .vault-face {
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    transform: rotateY(0deg); /* explicit, so backface-visibility is honored */
+    display: flex;
+    flex-direction: column;
+    gap: .9rem;
+    padding: 1.25rem;
+    min-height: 100%;
+  }
+  /* visibility swap guarantees the hidden face is neither seen (mirrored)
+     nor clickable — backface-visibility alone is not reliable everywhere */
+  .vault-card .vault-card-back  { visibility: hidden; }
+  .vault-card.flipped .vault-card-front { visibility: hidden; }
+  .vault-card.flipped .vault-card-back  { visibility: visible; }
+  .vault-card-back {
+    position: absolute;
+    inset: 0;
+    transform: rotateY(180deg);
+    overflow-y: auto;
+  }
 
   .vault-header {
     display: flex;
@@ -188,14 +216,11 @@
     margin-top: auto;
   }
 
-  /* ── LUKS header details expander ── */
-  .vault-details {
-    display: none;
-    margin-top: .75rem;
-    padding-top: .75rem;
-    border-top: 1px dashed var(--border);
-  }
+  /* ── LUKS header details (shown on the card's back face) ── */
   .vault-details .vault-meta { gap: .3rem; }
+  /* Back button pinned to the bottom-left corner of the card */
+  .vault-card-back .vault-details { flex: 1; display: flex; flex-direction: column; }
+  .vault-card-back .vault-details > .btn { margin-top: auto; align-self: flex-start; }
   .keyslot-chip {
     display: inline-block;
     font-family: var(--mono);
@@ -1082,7 +1107,9 @@ function vaultCard(v) {
   }
 
   return `
-    <div class="vault-card ${status}">
+    <div class="vault-card ${status}" id="vault-card-${v.id}">
+     <div class="vault-card-inner">
+      <div class="vault-face vault-card-front">
       <div class="vault-header">
         <span class="vault-name">${esc(v.name)}</span>
         <span class="badge badge-${status}">${label}</span>
@@ -1095,7 +1122,6 @@ function vaultCard(v) {
         <div class="meta-row"><span class="meta-label">Created</span><span class="meta-value">${fmtDate(v.created_at)}</span></div>
       </div>
       ${usageHtml}
-      <div class="vault-details" id="vault-details-${v.id}"></div>
       <div class="vault-actions">
         ${lockBtn}
         <button class="btn btn-ghost" onclick="toggleDetails(${v.id})">
@@ -1110,19 +1136,26 @@ function vaultCard(v) {
           </svg>Delete
         </button>
       </div>
+      </div>
+      <div class="vault-face vault-card-back">
+        <div class="vault-details" id="vault-details-${v.id}"></div>
+      </div>
+     </div>
     </div>`;
 }
 
 // ── LUKS header details ───────────────────────────────────────────────────────
-// Fetched lazily on first expand and cached per vault id; the header only
+// Fetched lazily on first flip and cached per vault id; the header only
 // changes when keyslots are mutated, so no refresh affordance is needed.
 const detailsCache = new Map();
 
+// Details flips the card to its back face (CSS 3D) instead of expanding it,
+// so sibling cards in the same grid row keep their height.
 async function toggleDetails(id) {
+  const card = document.getElementById('vault-card-' + id);
   const wrap = document.getElementById('vault-details-' + id);
-  if (wrap.style.display === 'block') { wrap.style.display = 'none'; return; }
-  wrap.style.display = 'block';
-  if (wrap.dataset.loaded === '1') return;
+  const flipped = card.classList.toggle('flipped');
+  if (!flipped || wrap.dataset.loaded === '1') return;
 
   if (!detailsCache.has(id)) {
     wrap.innerHTML = '<div class="details-loading">Reading LUKS header…</div>';
@@ -1157,7 +1190,8 @@ function renderDetails(d, vaultId) {
           <button class="btn btn-ghost btn-tiny" onclick="showManageKeySlots(${vaultId})">Manage keyslots</button>
         </span>
       </div>
-    </div>`;
+    </div>
+    <button type="button" class="btn btn-ghost btn-tiny" onclick="toggleDetails(${vaultId})">&larr; Back</button>`;
 }
 
 // ── Keyslot management ────────────────────────────────────────────────────────
@@ -1169,7 +1203,8 @@ function renderDetails(d, vaultId) {
 function refreshDetails(vaultId, details) {
   detailsCache.set(vaultId, details);
   const wrap = document.getElementById('vault-details-' + vaultId);
-  if (wrap && wrap.style.display === 'block') {
+  const card = document.getElementById('vault-card-' + vaultId);
+  if (wrap && card && card.classList.contains('flipped')) {
     wrap.innerHTML = renderDetails(details, vaultId);
   }
   if (document.getElementById('keyslot-manage-modal').classList.contains('open')) {
