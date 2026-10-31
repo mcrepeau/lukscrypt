@@ -3,7 +3,7 @@
 # so Go toolchain binaries execute without QEMU. GOARCH=$TARGETARCH tells the
 # Go compiler to cross-compile for the target platform (e.g. arm64).
 # CGO_ENABLED=0 makes this work without a cross-C-compiler.
-FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS builder
 
 ARG TARGETARCH
 ARG VERSION=dev
