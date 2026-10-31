@@ -870,6 +870,7 @@ func (h *handler) growVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := vaultGrow(h.ctx, v, req.SizeGB, key); err != nil {
+		slog.Warn("vault grow failed", "vault", v.Name, "to_gb", req.SizeGB, "err", err)
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}

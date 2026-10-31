@@ -185,7 +185,11 @@ a crash-restart restarts the window at process start.
 
 ### Logs
 
-Structured JSON to stdout (`docker logs lukscrypt`). Note `docker compose down` deletes
+Structured JSON to stdout (`docker logs lukscrypt`) — every request plus domain events:
+`vault created and mounted` / `vault creation failed` (with the failing step, logged
+even if no browser is watching the SSE stream), `vault grown` / `vault grow failed`,
+`vault auto-locked`, `keyslot added/removed`, `vault imported`, `session created`,
+`api token created/revoked`. Note `docker compose down` deletes
 container logs — use a logging driver (`journald`, `syslog`, ...) or bound json-file
 (`max-size: "10m"`, `max-file: "3"`) for a persistent audit trail. The DB in `/data` is a
 single small SQLite file — copy it off the NAS as your config backup.

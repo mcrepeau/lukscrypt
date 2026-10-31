@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,9 @@ func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int,
 		}
 	}
 	fail := func(context string, err error) {
+		// Log independently of the SSE channel: if no client is connected,
+		// the error must still land in `docker logs`.
+		slog.Error("vault creation failed", "vault", name, "step", context, "err", err)
 		sendTerminal(ProgressEvent{Error: fmt.Sprintf("%s: %v", context, err)})
 	}
 
@@ -177,6 +181,7 @@ func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int,
 		return
 	}
 
+	slog.Info("vault created and mounted", "vault", name, "path", imgPath, "size_gb", sizeGB, "vault_id", vault.ID)
 	sendTerminal(ProgressEvent{
 		Step:    "done",
 		Message: "Vault created and mounted successfully!",
