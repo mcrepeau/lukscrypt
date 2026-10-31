@@ -58,7 +58,13 @@ func AddKeyFile(v *db.Vault, existing, newKey []byte, slot int) error {
 		return fmt.Errorf("create temp key file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() {
+		// Wipe the key material before unlinking: if the process is SIGKILLed
+		// between now and the remove, the file would survive in /tmp with the
+		// credential in it.
+		os.WriteFile(tmpPath, make([]byte, len(newKey)), 0o600)
+		os.Remove(tmpPath)
+	}()
 	if err := tmp.Chmod(0600); err != nil {
 		tmp.Close()
 		return fmt.Errorf("secure temp key file: %w", err)
@@ -92,6 +98,22 @@ func AddKeyFile(v *db.Vault, existing, newKey []byte, slot int) error {
 func KillSlot(v *db.Vault, remainingPassword string, slot int) error {
 	cmd := exec.Command("cryptsetup", "luksKillSlot", v.Path, strconv.Itoa(slot))
 	cmd.Stdin = strings.NewReader(remainingPassword)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("luksKillSlot: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// KillSlotKeyFile is KillSlot with a raw keyfile as the remaining credential:
+// the bytes go to cryptsetup's stdin via --key-file=- with an exact
+// --keyfile-size, so binary content is used verbatim. Needed when the only
+// other valid keyslot is keyfile-based (a passphrase cannot prove authority
+// for a keyfile slot and vice versa).
+func KillSlotKeyFile(v *db.Vault, key []byte, slot int) error {
+	cmd := exec.Command("cryptsetup", "luksKillSlot",
+		"--key-file=-", "--keyfile-size="+strconv.Itoa(len(key)),
+		v.Path, strconv.Itoa(slot))
+	cmd.Stdin = bytes.NewReader(key)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("luksKillSlot: %s", strings.TrimSpace(string(out)))
 	}

@@ -54,6 +54,21 @@ func TestMountedIn(t *testing.T) {
 			mounts:     realMounts,
 			want:       false,
 		},
+		// /proc/mounts octal-escapes special characters in its fields
+		// (space → \040), so a mount point with a space must be compared
+		// in its escaped form.
+		{
+			name:       "space in mount point matches escaped entry",
+			mountPoint: "/mnt/my vault",
+			mounts:     []byte("/dev/mapper/x /mnt/my\\040vault ext4 rw 0 0\n"),
+			want:       true,
+		},
+		{
+			name:       "escaped entry does not match a different name",
+			mountPoint: "/mnt/my vault2",
+			mounts:     []byte("/dev/mapper/x /mnt/my\\040vault ext4 rw 0 0\n"),
+			want:       false,
+		},
 	}
 
 	for _, tt := range tests {

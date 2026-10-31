@@ -100,6 +100,15 @@ func main() {
 	sig := <-quit
 	slog.Info("received signal, shutting down", "signal", sig.String())
 
+	// A second signal means "stop waiting": exit immediately. The graceful
+	// locking below is skipped, so vaults may stay open on the host — the
+	// log line says so explicitly.
+	go func() {
+		sig2 := <-quit
+		slog.Warn("second signal received — exiting immediately, skipping vault locking", "signal", sig2.String())
+		os.Exit(1)
+	}()
+
 	// Cancel first: in-flight vault operations are interrupted, cleanup
 	// goroutines exit, and open SSE streams receive any final events and close.
 	// Shutdown then waits for remaining HTTP connections to drain.

@@ -426,7 +426,7 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/import` | Yes | Registers an existing image file as a vault (no copy); `409` if the name or path is already registered or currently being created, `422` if not a LUKS container |
 | `POST` | `/api/vaults/{id}/grow` | Yes | Grows a mounted vault to `size_gb` (online) with `password` or base64 `key_file`; grow-only, `409` if not mounted |
 | `POST` | `/api/vaults/{id}/keyslot/add` | Yes | Adds a passphrase keyslot (returns re-read LUKS details) |
-| `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Removes a keyslot by index (returns re-read LUKS details); returns `409` if it is the last valid keyslot |
+| `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Removes a keyslot by index with `password` or base64 `key_file` (returns re-read LUKS details); returns `409` if it is the last valid keyslot |
 | `GET` | `/api/vaults/details/{id}` | Yes | LUKS header details (cipher, hash, key size, keyslots, UUID) — read-only, no passphrase required, works on locked vaults |
 | `DELETE` | `/api/vaults/{id}` | Yes | Deletes a locked vault (image file + mount directory); returns `422` if the vault is still unlocked |
 
@@ -489,12 +489,23 @@ POST /api/vaults/{id}/keyslot/remove
 { "password": "...", "key_slot": 1 }
 ```
 
-The password must match a *different*, still-valid keyslot (that is the proof of
-authority for removing one). Removing the last valid keyslot would make the master
-key — and therefore the vault data — permanently unrecoverable, so it is refused with
-`409` before `cryptsetup luksKillSlot` runs (cryptsetup enforces the same rule as a
-second line of defense). Both endpoints are rate-limited like unlock, since a wrong
-existing password is the same brute-force surface.
+or, when the other valid keyslot is keyfile-based:
+
+```json
+{ "key_file": "<base64>", "key_slot": 1 }
+```
+
+Exactly one of `password` / `key_file` must be provided, and it must match a
+*different*, still-valid keyslot (that is the proof of authority for removing one).
+Removing the last valid keyslot would make the master key — and therefore the vault
+data — permanently unrecoverable, so it is refused with `409` before `cryptsetup
+luksKillSlot` runs (cryptsetup enforces the same rule as a second line of defense).
+Both endpoints are rate-limited like unlock, since a wrong existing credential is the
+same brute-force surface.
+
+Passphrases are single-line: cryptsetup reads one line from stdin, so a passphrase
+containing a newline is truncated at the first newline — never use newlines in a
+passphrase.
 
 ### SSE event format
 

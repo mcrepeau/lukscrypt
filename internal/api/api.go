@@ -606,11 +606,26 @@ func (h *handler) keyslotRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Password string `json:"password"`
+		KeyFile  string `json:"key_file"` // base64-encoded keyfile bytes
 		KeySlot  int    `json:"key_slot"`
 	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Password == "" || req.KeySlot < 0 || req.KeySlot > vault.MaxKeySlot {
-		jsonErr(w, "password is required and key_slot must be between 0 and 31", http.StatusBadRequest)
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.KeySlot < 0 || req.KeySlot > vault.MaxKeySlot {
+		jsonErr(w, "key_slot must be between 0 and 31", http.StatusBadRequest)
 		return
+	}
+	// Exactly one remaining credential — a passphrase or a keyfile, whichever
+	// matches a different, still-valid keyslot. Keyfile support matters when
+	// the only other valid slot is keyfile-based.
+	if (req.Password == "") == (req.KeyFile == "") {
+		jsonErr(w, "provide either password or key_file (not both)", http.StatusBadRequest)
+		return
+	}
+	var key []byte
+	if req.KeyFile != "" {
+		if key, err = decodeKeyFile(req.KeyFile); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	v, ok := h.lookupVault(w, id)
 	if !ok {
@@ -627,7 +642,12 @@ func (h *handler) keyslotRemove(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusConflict)
 		return
 	}
-	if err := vaultKillSlot(v, req.Password, req.KeySlot); err != nil {
+	if req.KeyFile != "" {
+		err = vaultKillSlotKeyFile(v, key, req.KeySlot)
+	} else {
+		err = vaultKillSlot(v, req.Password, req.KeySlot)
+	}
+	if err != nil {
 		jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
@@ -1288,8 +1308,9 @@ var vaultDumpDetails = vault.DumpDetails
 // vaultAddKey and vaultKillSlot are indirections over vault.AddKey/KillSlot
 // for the same reason.
 var (
-	vaultAddKey   = vault.AddKey
-	vaultKillSlot = vault.KillSlot
+	vaultAddKey         = vault.AddKey
+	vaultKillSlot       = vault.KillSlot
+	vaultKillSlotKeyFile = vault.KillSlotKeyFile
 )
 
 // vaultUnlock, vaultUnlockKeyFile and vaultAddKeyFile follow the same pattern.

@@ -1867,13 +1867,18 @@ func TestKeyslotRemoveValidation(t *testing.T) {
 		name string
 		body map[string]any
 	}{
-		{"missing password", map[string]any{"key_slot": 1}},
+		{"no credential", map[string]any{"key_slot": 1}},
+		{"both password and key_file", map[string]any{"password": "correct horse", "key_file": b64("a-file-keyfile-0123456789"), "key_slot": 1}},
+		{"invalid key_file base64", map[string]any{"key_file": "!!!not-base64!!!", "key_slot": 1}},
+		{"key_file too short", map[string]any{"key_file": b64("short"), "key_slot": 1}},
 		{"negative slot", map[string]any{"password": "correct horse", "key_slot": -1}},
 		{"slot too high", map[string]any{"password": "correct horse", "key_slot": 32}},
 	}
-	for _, tt := range tests {
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/remove", "admin", "testpass", "10.2.2.2:2", tt.body)
+			// One IP per subtest: the endpoint shares unlock's rate limiter
+			// (burst 5), so a shared IP would 429 before reaching validation.
+			w := request(h, http.MethodPost, "/api/vaults/99999/keyslot/remove", "admin", "testpass", fmt.Sprintf("10.2.2.%d:2", i+1), tt.body)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
 			}
@@ -1948,6 +1953,40 @@ func TestKeyslotRemoveSuccess(t *testing.T) {
 	}
 	if len(resp.KeySlots) != 2 {
 		t.Errorf("keyslots = %+v, want re-read details in response", resp.KeySlots)
+	}
+}
+
+// keyslot/remove also accepts a keyfile as the remaining credential — needed
+// when the only other valid keyslot is keyfile-based.
+func TestKeyslotRemoveWithKeyFile(t *testing.T) {
+	h, database := newTestMux(t)
+	v, err := database.CreateVault("testvault", "/vaults/testvault.img", 10, "/mnt/testvault", "testvault")
+	if err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+	stubKeyOps(t, nil, nil,
+		func(*db.Vault) (*vault.LUKSDetails, error) {
+			return &vault.LUKSDetails{Version: "2", KeySlots: []vault.KeySlot{
+				{Index: 0, Type: "argon2id", Status: "valid"},
+				{Index: 1, Type: "argon2id", Status: "valid"},
+			}}, nil
+		})
+	var gotKey []byte
+	var gotSlot = -1
+	origKillKF := vaultKillSlotKeyFile
+	vaultKillSlotKeyFile = func(_ *db.Vault, key []byte, slot int) error {
+		gotKey, gotSlot = key, slot
+		return nil
+	}
+	t.Cleanup(func() { vaultKillSlotKeyFile = origKillKF })
+
+	w := auth(h, http.MethodPost, fmt.Sprintf("/api/vaults/%d/keyslot/remove", v.ID),
+		map[string]any{"key_file": b64("a-file-keyfile-0123456789"), "key_slot": 1})
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if string(gotKey) != "a-file-keyfile-0123456789" || gotSlot != 1 {
+		t.Errorf("KillSlotKeyFile got key=%q slot=%d, want keyfile and slot 1", gotKey, gotSlot)
 	}
 }
 

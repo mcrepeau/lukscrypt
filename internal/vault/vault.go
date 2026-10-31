@@ -140,6 +140,7 @@ func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int,
 		exec.Command("cryptsetup", "luksClose", mapperName).Run()
 		fail(fmt.Sprintf("mount (%s)", strings.TrimSpace(string(out))), err)
 		os.Remove(imgPath)
+		os.Remove(mountPoint)
 		return
 	}
 	// Make the root directory of the new filesystem world-writable so that
@@ -448,7 +449,23 @@ func IsMounted(v *db.Vault) bool {
 
 // mountedIn checks whether mountPoint appears as a mount destination in the
 // given /proc/mounts snapshot. Space delimiters prevent false prefix matches.
+// /proc/mounts octal-escapes special characters in its fields (space → \040,
+// tab → \011, newline → \012, backslash → \134), so the mount point must be
+// escaped the same way before comparing — a mount base directory containing
+// a space would otherwise never match.
 func mountedIn(mountPoint string, mounts []byte) bool {
-	return bytes.Contains(mounts, []byte(" "+mountPoint+" "))
+	return bytes.Contains(mounts, []byte(" "+procMountsEscape(mountPoint)+" "))
+}
+
+// procMountsEscape escapes a path the way /proc/mounts renders its fields.
+// NewReplacer is single-pass (replaced output is not rescanned), so order
+// does not cause double-escaping.
+func procMountsEscape(s string) string {
+	return strings.NewReplacer(
+		`\`, `\134`,
+		" ", `\040`,
+		"\t", `\011`,
+		"\n", `\012`,
+	).Replace(s)
 }
 

@@ -773,9 +773,17 @@
       removing keyslots — the vault data cannot be recovered without at least one valid keyslot.
     </p>
     <div>
-      <div class="form-group">
+      <div class="tab-group">
+        <button type="button" class="tab active" id="ks-remove-tab-password" onclick="setKsRemoveMode('password')">Password</button>
+        <button type="button" class="tab" id="ks-remove-tab-keyfile" onclick="setKsRemoveMode('keyfile')">Keyfile</button>
+      </div>
+      <div class="form-group" id="ks-remove-pass-group">
         <label class="form-label">Password of a different keyslot <span>*</span></label>
         <input type="password" id="ks-remove-pass" onkeydown="if(event.key==='Enter')submitRemoveKeySlot()">
+      </div>
+      <div class="form-group" id="ks-remove-keyfile-group" style="display:none">
+        <label class="form-label">Keyfile of a different keyslot <span>*</span></label>
+        <input type="file" id="ks-remove-keyfile" style="color:var(--text-muted)">
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-ghost" onclick="closeModal('keyslot-remove-modal')">Cancel</button>
@@ -894,6 +902,7 @@ let pendingGrowId = null;
 let unlockUsesKeyfile = false;
 let ksExistingUsesKeyfile = false;
 let ksNewUsesKeyfile = false;
+let ksRemoveUsesKeyfile = false;
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => { loadConfig(); loadVaults(); });
@@ -1227,13 +1236,23 @@ async function submitAddKeySlot() {
   }
 }
 
+function setKsRemoveMode(mode) {
+  ksRemoveUsesKeyfile = mode === 'keyfile';
+  document.getElementById('ks-remove-tab-password').classList.toggle('active', mode === 'password');
+  document.getElementById('ks-remove-tab-keyfile').classList.toggle('active', mode === 'keyfile');
+  document.getElementById('ks-remove-pass-group').style.display = mode === 'password' ? '' : 'none';
+  document.getElementById('ks-remove-keyfile-group').style.display = mode === 'keyfile' ? '' : 'none';
+}
+
 function showRemoveKeySlot(id, slot) {
   pendingKeySlotVaultId = id;
   pendingKeySlotIndex = slot;
+  setKsRemoveMode('password');
   const v = vaults.find(x => x.id === id);
   document.getElementById('keyslot-remove-slot').textContent = slot;
   document.getElementById('keyslot-remove-vault-name').textContent = v ? v.name : `#${id}`;
   document.getElementById('ks-remove-pass').value = '';
+  document.getElementById('ks-remove-keyfile').value = '';
   const btn = document.getElementById('keyslot-remove-btn');
   btn.disabled = false;
   btn.textContent = 'Remove keyslot';
@@ -1242,14 +1261,22 @@ function showRemoveKeySlot(id, slot) {
 }
 
 async function submitRemoveKeySlot() {
-  const pass = document.getElementById('ks-remove-pass').value;
+  let body = { key_slot: pendingKeySlotIndex };
+  if (ksRemoveUsesKeyfile) {
+    const f = selectedKeyfile('ks-remove-keyfile');
+    if (!f) return;
+    try {
+      body.key_file = await fileToBase64(f);
+    } catch (e) { toast(e.message, 'error'); return; }
+  } else {
+    body.password = document.getElementById('ks-remove-pass').value;
+  }
   const btn = document.getElementById('keyslot-remove-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-inline"></span>Removing…';
 
   try {
-    const details = await api('POST', `/api/vaults/${pendingKeySlotVaultId}/keyslot/remove`,
-      { password: pass, key_slot: pendingKeySlotIndex });
+    const details = await api('POST', `/api/vaults/${pendingKeySlotVaultId}/keyslot/remove`, body);
     closeModal('keyslot-remove-modal');
     refreshDetails(pendingKeySlotVaultId, details);
     toast(`Keyslot ${pendingKeySlotIndex} removed.`, 'success');

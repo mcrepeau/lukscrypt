@@ -76,7 +76,10 @@ func (d *DB) CreateVault(name, path string, sizeGB int, mountPoint, mapperName s
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
 	return &Vault{
 		ID:         id,
 		Name:       name,
