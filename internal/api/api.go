@@ -80,6 +80,13 @@ type handler struct {
 	// through any endpoint's 401 responses.
 	authLimiters map[string]*unlockEntry
 	authMu       sync.Mutex
+	// sessions is the in-memory UI login store (single process; a restart
+	// just means everyone logs in again). Basic Auth remains valid for API
+	// clients — a valid Authorization header passes without a session.
+	sessions      map[string]*session
+	sessionsMu    sync.Mutex
+	sessionIdle   time.Duration // sliding expiry, touched on each request
+	sessionMaxAge time.Duration // absolute cap from login
 	// autoLockHours is the maximum time a vault may stay unlocked; 0 disables
 	// auto-lock. unlockedAt records when each vault was unlocked, so the
 	// auto-lock sweep can enforce the policy. In-memory by design: runtime
@@ -122,7 +129,7 @@ type vaultResponse struct {
 	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 }
 
-func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int, trustProxy bool, autoLockHours float64, version string) http.Handler {
+func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs, mountDirs []string, authUser, authPass string, maxSizeGB int, trustProxy bool, autoLockHours float64, sessionIdle, sessionMaxAge time.Duration, version string) http.Handler {
 	h := &handler{
 		ctx:            ctx,
 		version:        version,
@@ -132,19 +139,23 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 		mountDirs:      mountDirs,
 		authUser:       authUser,
 		authPass:       authPass,
-		maxSizeGB:       maxSizeGB,
-		trustProxy:      trustProxy,
-		autoLockHours:   autoLockHours,
-		jobs:            make(map[string]*jobEntry),
-		pendingNames:    make(map[string]struct{}),
-		pendingPaths:    make(map[string]struct{}),
-		unlockLimiters:  make(map[string]*unlockEntry),
-		authLimiters:    make(map[string]*unlockEntry),
-		unlockedAt:      make(map[int64]time.Time),
+		maxSizeGB:      maxSizeGB,
+		trustProxy:     trustProxy,
+		autoLockHours:  autoLockHours,
+		sessionIdle:    sessionIdle,
+		sessionMaxAge:  sessionMaxAge,
+		sessions:       make(map[string]*session),
+		jobs:           make(map[string]*jobEntry),
+		pendingNames:   make(map[string]struct{}),
+		pendingPaths:   make(map[string]struct{}),
+		unlockLimiters: make(map[string]*unlockEntry),
+		authLimiters:   make(map[string]*unlockEntry),
+		unlockedAt:     make(map[int64]time.Time),
 	}
 	go h.cleanupLimiters(ctx)
 	go h.cleanupJobs(ctx)
 	go h.autoLockLoop(ctx)
+	go h.cleanupSessions(ctx)
 
 	mux := http.NewServeMux()
 	// Static
@@ -175,12 +186,18 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	mux.HandleFunc("GET /api/vaults/details/{id}", h.vaultDetails)
 	// SSE progress stream — must be registered before /{id} patterns to win specificity
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
+	// Logout (authed: a valid session or Basic Auth is required to reach it)
+	mux.HandleFunc("POST /logout", h.logout)
 
-	authenticated := h.requestLogger(h.securityHeaders(h.csrfGuard(h.limitBody(h.basicAuth(mux)))))
+	authenticated := h.requestLogger(h.securityHeaders(h.csrfGuard(h.limitBody(h.auth(mux)))))
 
-	// /healthz is unauthenticated so container orchestrators can probe it without credentials.
+	// /healthz is unauthenticated so container orchestrators can probe it without
+	// credentials. /login is the public UI login page (its POST is rate-limited like
+	// any other credential check).
 	top := http.NewServeMux()
 	top.HandleFunc("GET /healthz", h.healthz)
+	top.Handle("GET /login", h.requestLogger(h.securityHeaders(http.HandlerFunc(h.loginPage))))
+	top.Handle("POST /login", h.requestLogger(h.securityHeaders(http.HandlerFunc(h.login))))
 	top.Handle("/", authenticated)
 	return top
 }
@@ -1308,8 +1325,8 @@ var vaultDumpDetails = vault.DumpDetails
 // vaultAddKey and vaultKillSlot are indirections over vault.AddKey/KillSlot
 // for the same reason.
 var (
-	vaultAddKey         = vault.AddKey
-	vaultKillSlot       = vault.KillSlot
+	vaultAddKey          = vault.AddKey
+	vaultKillSlot        = vault.KillSlot
 	vaultKillSlotKeyFile = vault.KillSlotKeyFile
 )
 
@@ -1351,30 +1368,175 @@ func decodeKeyFile(b64 string) ([]byte, error) {
 	return data, nil
 }
 
-func (h *handler) basicAuth(next http.Handler) http.Handler {
+// session is one UI login. In-memory by design: the app is single-process, and
+// a restart simply means everyone logs in again.
+type session struct {
+	createdAt time.Time
+	lastSeen  time.Time
+}
+
+const sessionCookieName = "lukscrypt_session"
+
+// validCredentials checks the master credentials in constant time.
+func (h *handler) validCredentials(user, pass string) bool {
+	userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(h.authUser))
+	passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(h.authPass))
+	return userMatch == 1 && passMatch == 1
+}
+
+// auth accepts either a valid session cookie (the UI path, with expiry and
+// logout) or a valid Basic Auth header (the API/script path — no session is
+// created, so curl keeps working unchanged). Failures are throttled per IP:
+// without that, the master AUTH_PASSWORD could be brute-forced at unlimited
+// speed via the 401s of any endpoint.
+func (h *handler) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(h.authUser))
-		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(h.authPass))
-		if !ok || userMatch != 1 || passMatch != 1 {
-			// Failed logins are throttled per IP: otherwise the master
-			// AUTH_PASSWORD could be brute-forced at unlimited speed via the
-			// 401s of any endpoint. 429 deliberately omits WWW-Authenticate —
-			// the client is throttled, not unauthorized, so browsers should
-			// not re-prompt.
-			if !h.authAllowed(r) {
-				jsonErr(w, "too many failed login attempts — wait before trying again", http.StatusTooManyRequests)
-				return
-			}
-			w.Header().Set("WWW-Authenticate", `Basic realm="lukscrypt"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		if h.validSession(r) {
+			h.clearAuthFailures(r)
+			next.ServeHTTP(w, r)
 			return
 		}
-		// A successful login resets this IP's failure counter, so a user who
-		// typo'd a few times is not locked out later.
-		h.clearAuthFailures(r)
-		next.ServeHTTP(w, r)
+		if user, pass, ok := r.BasicAuth(); ok && h.validCredentials(user, pass) {
+			// A successful login resets this IP's failure counter, so a user who
+			// typo'd a few times is not locked out later.
+			h.clearAuthFailures(r)
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 429 deliberately omits WWW-Authenticate — the client is throttled, not
+		// unauthorized, so browsers should not re-prompt.
+		if !h.authAllowed(r) {
+			jsonErr(w, "too many failed login attempts — wait before trying again", http.StatusTooManyRequests)
+			return
+		}
+		// A browser navigating without credentials gets the login page instead
+		// of a native 401 prompt; API clients (fetch/curl) get the standard 401
+		// challenge and the UI redirects on 401.
+		if r.Method == http.MethodGet && r.Header.Get("Authorization") == "" &&
+			strings.Contains(r.Header.Get("Accept"), "text/html") {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="lukscrypt"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	})
+}
+
+// validSession reports whether the request carries a live session cookie and
+// refreshes its idle timestamp (sliding expiry). Expired sessions are deleted.
+func (h *handler) validSession(r *http.Request) bool {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
+	s, ok := h.sessions[c.Value]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	if now.Sub(s.lastSeen) > h.sessionIdle || now.Sub(s.createdAt) > h.sessionMaxAge {
+		delete(h.sessions, c.Value)
+		return false
+	}
+	s.lastSeen = now
+	return true
+}
+
+// loginPage serves the UI login form (public route).
+func (h *handler) loginPage(w http.ResponseWriter, r *http.Request) {
+	data, err := h.webFS.ReadFile("web/login.html")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
+}
+
+// login verifies the master credentials (rate-limited like every other
+// credential check) and issues a session cookie.
+func (h *handler) login(w http.ResponseWriter, r *http.Request) {
+	if !h.authAllowed(r) {
+		jsonErr(w, "too many failed login attempts — wait before trying again", http.StatusTooManyRequests)
+		return
+	}
+	var req struct {
+		User     string `json:"user"`
+		Password string `json:"password"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.User == "" || req.Password == "" {
+		jsonErr(w, "user and password are required", http.StatusBadRequest)
+		return
+	}
+	if !h.validCredentials(req.User, req.Password) {
+		// No WWW-Authenticate here: this is a form login, and the header would
+		// make browsers pop the native Basic Auth dialog over the form.
+		jsonErr(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	h.clearAuthFailures(r)
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		jsonErr(w, "failed to create session", http.StatusInternalServerError)
+		return
+	}
+	token := hex.EncodeToString(b[:])
+	now := time.Now()
+	h.sessionsMu.Lock()
+	h.sessions[token] = &session{createdAt: now, lastSeen: now}
+	h.sessionsMu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		// Secure only over TLS — plain-HTTP local testing must still work.
+		Secure: r.TLS != nil,
+		MaxAge: int(h.sessionMaxAge.Seconds()),
+	})
+	slog.Info("session created", "user", req.User, "ip", clientIP(r, h.trustProxy))
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// logout deletes the caller's session and clears the cookie. Registered on the
+// authed mux, so a valid session or Basic Auth is required to reach it.
+func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(sessionCookieName); err == nil {
+		h.sessionsMu.Lock()
+		delete(h.sessions, c.Value)
+		h.sessionsMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: "", Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1,
+	})
+	slog.Info("session ended (logout)", "ip", clientIP(r, h.trustProxy))
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// cleanupSessions drops expired sessions every 5 minutes so the map cannot
+// grow unbounded.
+func (h *handler) cleanupSessions(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			h.sessionsMu.Lock()
+			for tok, s := range h.sessions {
+				if now.Sub(s.lastSeen) > h.sessionIdle || now.Sub(s.createdAt) > h.sessionMaxAge {
+					delete(h.sessions, tok)
+				}
+			}
+			h.sessionsMu.Unlock()
+		}
+	}
 }
 
 // authAllowed consumes a failure token for the request's IP: burst of 5, then

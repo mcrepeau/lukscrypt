@@ -34,7 +34,7 @@ func newTestMux(t *testing.T) (http.Handler, *db.DB) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	h := NewMux(context.Background(), database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100, false, 0, "test")
+	h := NewMux(context.Background(), database, embed.FS{}, []string{"/vaults"}, []string{"/mnt"}, "admin", "testpass", 100, false, 0, time.Hour, 24*time.Hour, "test")
 	return h, database
 }
 
@@ -154,6 +154,183 @@ func TestBasicAuthRateLimitPerIP(t *testing.T) {
 	w := request(h, http.MethodGet, "/api/config", "admin", "wrongpass", "10.8.8.8:1234", nil)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("other IP: got %d, want 401 (own bucket, not 429)", w.Code)
+	}
+}
+
+// --- Sessions (UI login) --------------------------------------------------------
+
+func loginRequest(h http.Handler, user, pass, remoteAddr string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]string{"user": user, "password": pass})
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func sessionCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			return c
+		}
+	}
+	t.Fatal("no session cookie in login response")
+	return nil
+}
+
+func requestWithCookie(h http.Handler, method, path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	req.RemoteAddr = "127.0.0.1:9999"
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// The full UI flow: login issues a cookie, the cookie authenticates API calls,
+// logout invalidates it. Basic Auth keeps working alongside (TestBasicAuth).
+func TestLoginLogoutFlow(t *testing.T) {
+	h, _ := newTestMux(t)
+
+	// Wrong credentials → 401, no cookie.
+	w := loginRequest(h, "admin", "wrongpass", "10.7.7.1:1")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong login: got %d, want 401", w.Code)
+	}
+	if c := sessionCookieOrNil(w); c != nil {
+		t.Fatal("session cookie issued on failed login")
+	}
+
+	// Correct credentials → 200 + cookie.
+	w = loginRequest(h, "admin", "testpass", "10.7.7.1:1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	cookie := sessionCookie(t, w)
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("cookie flags: HttpOnly=%v SameSite=%v — want HttpOnly + SameSite=Strict", cookie.HttpOnly, cookie.SameSite)
+	}
+
+	// The cookie alone authenticates (no Basic Auth header).
+	if w := requestWithCookie(h, http.MethodGet, "/api/config", cookie); w.Code != http.StatusOK {
+		t.Errorf("api with session cookie: got %d, want 200", w.Code)
+	}
+
+	// Logout invalidates the session server-side.
+	if w := requestWithCookie(h, http.MethodPost, "/logout", cookie); w.Code != http.StatusOK {
+		t.Fatalf("logout: got %d, want 200", w.Code)
+	}
+	if w := requestWithCookie(h, http.MethodGet, "/api/config", cookie); w.Code != http.StatusUnauthorized {
+		t.Errorf("api after logout: got %d, want 401", w.Code)
+	}
+}
+
+func sessionCookieOrNil(w *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+// Login attempts share the per-IP failure limiter: burst 5, then 429.
+func TestLoginRateLimited(t *testing.T) {
+	h, _ := newTestMux(t)
+	for i := 0; i < 5; i++ {
+		if w := loginRequest(h, "admin", "wrongpass", "10.7.7.2:1"); w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: got %d, want 401", i, w.Code)
+		}
+	}
+	if w := loginRequest(h, "admin", "wrongpass", "10.7.7.2:1"); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("6th failure: got %d, want 429", w.Code)
+	}
+}
+
+// A browser navigating to / without credentials is redirected to the login
+// page instead of getting a native 401 prompt.
+func TestBrowserNavigationRedirectsToLogin(t *testing.T) {
+	h, _ := newTestMux(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:9999"
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" {
+		t.Errorf("got %d Location=%q, want 303 /login", w.Code, w.Header().Get("Location"))
+	}
+	// API-style request (no HTML accept) still gets the 401 challenge.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/vaults", nil)
+	req2.RemoteAddr = "127.0.0.1:9999"
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusUnauthorized || w2.Header().Get("WWW-Authenticate") == "" {
+		t.Errorf("api request: got %d, want 401 with WWW-Authenticate", w2.Code)
+	}
+}
+
+// Sessions expire: idle timeout and absolute max age both invalidate them.
+func TestSessionExpiry(t *testing.T) {
+	h := &handler{
+		authUser:       "admin",
+		authPass:       "testpass",
+		authLimiters:   make(map[string]*unlockEntry),
+		sessions:       make(map[string]*session),
+		sessionIdle:    time.Minute,
+		sessionMaxAge:  time.Hour,
+	}
+	body, _ := json.Marshal(map[string]string{"user": "admin", "password": "testpass"})
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	h.login(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: got %d, want 200", w.Code)
+	}
+	cookie := sessionCookie(t, w)
+
+	authed := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	authed.AddCookie(cookie)
+	if !h.validSession(authed) {
+		t.Fatal("fresh session should be valid")
+	}
+
+	// Age the session past the idle timeout.
+	h.sessionsMu.Lock()
+	for _, s := range h.sessions {
+		s.lastSeen = time.Now().Add(-2 * time.Hour)
+	}
+	h.sessionsMu.Unlock()
+	if h.validSession(authed) {
+		t.Error("idle-expired session still valid")
+	}
+
+	// Fresh session, but older than the absolute max age.
+	h2 := &handler{
+		authUser: "admin", authPass: "testpass",
+		authLimiters: make(map[string]*unlockEntry), sessions: make(map[string]*session),
+		sessionIdle: time.Hour, sessionMaxAge: time.Minute,
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body)) // fresh body
+	req2.RemoteAddr = "127.0.0.1:9999"
+	w2 := httptest.NewRecorder()
+	h2.login(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second login: got %d, want 200; body: %s", w2.Code, w2.Body.String())
+	}
+	cookie2 := sessionCookie(t, w2)
+	h2.sessionsMu.Lock()
+	for _, s := range h2.sessions {
+		s.createdAt = time.Now().Add(-2 * time.Hour)
+	}
+	h2.sessionsMu.Unlock()
+	authed2 := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	authed2.AddCookie(cookie2)
+	if h2.validSession(authed2) {
+		t.Error("session past its absolute max age still valid")
 	}
 }
 
@@ -911,7 +1088,7 @@ func newTestMuxWithDirs(t *testing.T, storageDirs, mountDirs []string) (http.Han
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { database.Close() })
-	h := NewMux(context.Background(), database, embed.FS{}, storageDirs, mountDirs, "admin", "testpass", 100, false, 0, "test")
+	h := NewMux(context.Background(), database, embed.FS{}, storageDirs, mountDirs, "admin", "testpass", 100, false, 0, time.Hour, 24*time.Hour, "test")
 	return h, database
 }
 

@@ -33,6 +33,7 @@ services:
       #                           # unlock rate limiting uses X-Forwarded-For
       # AUTO_LOCK_HOURS: "6"      # lock vaults after 6 hours unlocked; a float
       #                           # works (0.5 = 30 min); default 0 = disabled
+      # SESSION_IDLE_HOURS: "12"  # UI session idle timeout; default 12h
     privileged: true
     restart: unless-stopped
     # Graceful shutdown needs to drain HTTP connections and lock every

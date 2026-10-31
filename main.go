@@ -20,7 +20,7 @@ import (
 	"lukscrypt/internal/vault"
 )
 
-//go:embed web/index.html
+//go:embed web/index.html web/login.html
 var webFiles embed.FS
 
 // version is overridden at build time via:
@@ -63,6 +63,11 @@ func main() {
 	// disables auto-lock. A float allows sub-hour policies (e.g. 0.5 = 30 min).
 	autoLockHours := parseAutoLockHours(os.Getenv("AUTO_LOCK_HOURS"))
 
+	// Session lifetime for the UI login (Basic Auth remains the API fallback).
+	// Idle = sliding expiry (touched on each request); max age = absolute cap.
+	sessionIdle := time.Duration(parseHours(os.Getenv("SESSION_IDLE_HOURS"), 12) * float64(time.Hour))
+	sessionMaxAge := time.Duration(parseHours(os.Getenv("SESSION_MAX_AGE_HOURS"), 168) * float64(time.Hour))
+
 	database, err := db.Open(dbPath)
 	if err != nil {
 		slog.Error("failed to open database", "err", err)
@@ -77,6 +82,8 @@ func main() {
 		"max_vault_size_gb", maxSizeGB,
 		"trust_proxy", trustProxy,
 		"auto_lock_hours", autoLockHours,
+		"session_idle_hours", sessionIdle.Hours(),
+		"session_max_age_hours", sessionMaxAge.Hours(),
 	)
 
 	// serverCtx is cancelled on shutdown to stop background goroutines and
@@ -85,7 +92,7 @@ func main() {
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
 
-	srv := newHTTPServer(api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, trustProxy, autoLockHours, version))
+	srv := newHTTPServer(api.NewMux(serverCtx, database, webFiles, storageDirs, mountDirs, authUser, authPass, maxSizeGB, trustProxy, autoLockHours, sessionIdle, sessionMaxAge, version))
 
 	go func() {
 		slog.Info("lukscrypt listening", "addr", srv.Addr)
@@ -208,6 +215,20 @@ func parseAutoLockHours(env string) float64 {
 	v, err := strconv.ParseFloat(env, 64)
 	if err != nil || v < 0 {
 		slog.Error("AUTO_LOCK_HOURS must be a non-negative number of hours (e.g. 6 or 0.5; 0 disables)", "value", env)
+		os.Exit(1)
+	}
+	return v
+}
+
+// parseHours parses a positive float env var (a number of hours), falling back
+// to defaultVal. Exits the process if the value is present but not a positive number.
+func parseHours(env string, defaultVal float64) float64 {
+	if env == "" {
+		return defaultVal
+	}
+	v, err := strconv.ParseFloat(env, 64)
+	if err != nil || v <= 0 {
+		slog.Error("environment variable must be a positive number of hours", "value", env)
 		os.Exit(1)
 	}
 	return v

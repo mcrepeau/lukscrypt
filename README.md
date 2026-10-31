@@ -71,6 +71,7 @@ services:
       VAULT_MOUNT_DIRS: /mnt
       # TRUST_PROXY: "true"     # behind a reverse proxy → rate limits use X-Forwarded-For
       # AUTO_LOCK_HOURS: "6"    # auto-lock after 6h unlocked (0.5 = 30 min; 0 = off)
+      # SESSION_IDLE_HOURS: "12" # UI session idle timeout (default 12h)
       # AUTH_USER: admin         # default: admin
       # AUTH_PASSWORD: changeme  # default: random, printed once in container logs
     privileged: true          # needed for dm-crypt / loop devices / mount
@@ -129,6 +130,8 @@ host. If you see `mount: /mnt: mount point is not a shared mount`, run once on t
 | `VAULT_MAX_SIZE_GB` | `100` | Max vault size in GB (positive integer) |
 | `TRUST_PROXY` | `false` | `true` only behind a trusted proxy; enables per-client rate limiting via the last `X-Forwarded-For` entry |
 | `AUTO_LOCK_HOURS` | `0` (off) | Max time unlocked before auto-lock (e.g. `6`, `0.5`); busy mounts defer to the next sweep — never lazy-unmounted |
+| `SESSION_IDLE_HOURS` | `12` | UI session idle timeout (sliding — refreshed on each request) |
+| `SESSION_MAX_AGE_HOURS` | `168` | Absolute max UI session lifetime (7 days), regardless of activity |
 
 Multiple storage/mount dirs (e.g. `VAULT_STORAGE_DIRS: /vaults,/tank/encrypted`) show a
 dropdown in the UI; a single value is used automatically.
@@ -251,8 +254,11 @@ data: {"error":"luksFormat: ..."}
 
 - **TLS is required in production** — Basic Auth is base64 plaintext; always use a
   TLS-terminating reverse proxy and never expose 8080 on untrusted networks.
-- **Basic Auth on every endpoint**; an unset `AUTH_PASSWORD` generates a random one
-  printed once to the logs. Failed logins are rate-limited per IP (burst 5, then 1/min,
+- **Every endpoint requires auth**: the UI uses a session login (`/login` → HttpOnly,
+  SameSite=Strict cookie; idle expiry `SESSION_IDLE_HOURS`, absolute cap
+  `SESSION_MAX_AGE_HOURS`; Logout button ends it server-side), while API clients use
+  HTTP Basic Auth unchanged. An unset `AUTH_PASSWORD` generates a random one printed
+  once to the logs. Failed logins are rate-limited per IP (burst 5, then 1/min,
   HTTP `429`); unlock/grow/keyslot attempts too (burst 5, then 1 per 30s).
   `X-Forwarded-For` is honored only with `TRUST_PROXY=true`, last entry only.
 - **Credentials never appear in argv** — passphrases/keyfiles go to the subprocess's
