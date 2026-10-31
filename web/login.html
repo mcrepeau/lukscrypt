@@ -38,7 +38,6 @@
   .btn:hover:not(:disabled) { background: var(--primary-d); border-color: var(--primary-d); }
   .btn:disabled { opacity: .4; cursor: not-allowed; }
   #err { color: var(--danger); font-size: .8rem; min-height: 1.2em; margin-top: .75rem; text-align: center; }
-  .hint { color: var(--text-dim); font-size: .72rem; text-align: center; margin-top: 1rem; }
 </style>
 </head>
 <body>
@@ -63,7 +62,6 @@
     <button type="submit" class="btn" id="login-btn">Sign in</button>
     <div id="err"></div>
   </form>
-  <p class="hint">API clients can keep using HTTP Basic Auth.</p>
 </div>
 <script>
 'use strict';
