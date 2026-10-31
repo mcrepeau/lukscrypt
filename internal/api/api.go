@@ -199,10 +199,17 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	// /healthz is unauthenticated so container orchestrators can probe it without
 	// credentials. /login is the public UI login page (its POST is rate-limited like
 	// any other credential check).
+	// /login is public but still gets the defensive middleware: the CSRF origin
+	// guard and the body cap run BEFORE any credential check, so the pre-auth
+	// surface stays bounded (an oversized or cross-site login POST is rejected
+	// without being read).
+	loginPublic := func(next http.HandlerFunc) http.Handler {
+		return h.requestLogger(h.securityHeaders(h.csrfGuard(h.limitBody(next))))
+	}
 	top := http.NewServeMux()
 	top.HandleFunc("GET /healthz", h.healthz)
-	top.Handle("GET /login", h.requestLogger(h.securityHeaders(http.HandlerFunc(h.loginPage))))
-	top.Handle("POST /login", h.requestLogger(h.securityHeaders(http.HandlerFunc(h.login))))
+	top.Handle("GET /login", loginPublic(h.loginPage))
+	top.Handle("POST /login", loginPublic(h.login))
 	top.Handle("/", authenticated)
 	return top
 }
@@ -1626,8 +1633,12 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		// Secure only over TLS — plain-HTTP local testing must still work.
-		Secure: r.TLS != nil,
+		// Secure over TLS. Behind a TLS-terminating proxy the app sees plain
+		// HTTP (r.TLS == nil), so TRUST_PROXY=true also implies the outer hop
+		// is TLS and the cookie must be Secure — otherwise a direct plain-HTTP
+		// hit on :8080 could transmit it in the clear. Plain-HTTP local testing
+		// (no proxy) keeps Secure off so it still works.
+		Secure: r.TLS != nil || h.trustProxy,
 		MaxAge: int(h.sessionMaxAge.Seconds()),
 	})
 	slog.Info("session created", "user", req.User, "ip", clientIP(r, h.trustProxy))
@@ -1644,7 +1655,7 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: "", Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1,
+		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil || h.trustProxy, MaxAge: -1,
 	})
 	slog.Info("session ended (logout)", "ip", clientIP(r, h.trustProxy))
 	jsonOK(w, map[string]any{"ok": true})

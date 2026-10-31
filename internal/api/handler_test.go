@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"embed"
 	"encoding/base64"
@@ -331,6 +332,78 @@ func TestSessionExpiry(t *testing.T) {
 	authed2.AddCookie(cookie2)
 	if h2.validSession(authed2) {
 		t.Error("session past its absolute max age still valid")
+	}
+}
+
+// The public /login route gets the same pre-auth hardening as the authed
+// chain: body cap and CSRF origin guard.
+func TestLoginPreAuthHardening(t *testing.T) {
+	h, _ := newTestMux(t)
+
+	// Oversized login body → 400, not read into memory.
+	big := map[string]string{"user": "admin", "password": strings.Repeat("x", maxBodyBytes)}
+	b, _ := json.Marshal(big)
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(b))
+	req.RemoteAddr = "10.7.7.3:1"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("oversized /login body: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+
+	// Cross-origin POST /login → 403 before any credential check.
+	body, _ := json.Marshal(map[string]string{"user": "admin", "password": "testpass"})
+	req2 := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	req2.RemoteAddr = "10.7.7.4:1"
+	req2.Header.Set("Origin", "https://evil.example")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusForbidden {
+		t.Errorf("cross-origin /login: got %d, want 403", w2.Code)
+	}
+
+	// Same-origin POST /login passes the guard.
+	req3 := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	req3.RemoteAddr = "10.7.7.5:1"
+	req3.Header.Set("Origin", "http://"+req3.Host)
+	w3 := httptest.NewRecorder()
+	h.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Errorf("same-origin /login: got %d, want 200; body: %s", w3.Code, w3.Body.String())
+	}
+}
+
+// The session cookie must be Secure whenever the outer hop is TLS — directly
+// (r.TLS) or behind a trusted TLS proxy (TRUST_PROXY=true, where r.TLS is nil).
+// Plain-HTTP local testing keeps it off.
+func TestSessionCookieSecureFlag(t *testing.T) {
+	loginWith := func(trustProxy bool, useTLS bool) *http.Cookie {
+		h := &handler{
+			authUser: "admin", authPass: "testpass", trustProxy: trustProxy,
+			authLimiters: make(map[string]*unlockEntry), sessions: make(map[string]*session),
+			sessionIdle: time.Hour, sessionMaxAge: 24 * time.Hour,
+		}
+		body, _ := json.Marshal(map[string]string{"user": "admin", "password": "testpass"})
+		req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:9999"
+		if useTLS {
+			req.TLS = &tls.ConnectionState{}
+		}
+		w := httptest.NewRecorder()
+		h.login(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("login: got %d", w.Code)
+		}
+		return sessionCookie(t, w)
+	}
+	if c := loginWith(false, false); c.Secure {
+		t.Error("plain HTTP local testing: cookie must NOT be Secure")
+	}
+	if c := loginWith(false, true); !c.Secure {
+		t.Error("direct TLS: cookie must be Secure")
+	}
+	if c := loginWith(true, false); !c.Secure {
+		t.Error("behind TLS proxy (TRUST_PROXY): cookie must be Secure even though r.TLS is nil")
 	}
 }
 
