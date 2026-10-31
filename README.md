@@ -590,3 +590,7 @@ go vet ./...
 
 The SQLite driver (`modernc.org/sqlite`) is pure Go — no CGO required. The binary is
 fully static and cross-compiles cleanly with `GOARCH=arm64`.
+
+## License
+
+[MIT License](LICENSE) — Copyright (c) 2026 mcrepeau.
