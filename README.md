@@ -1,5 +1,8 @@
 # LUKSCrypt
 
+[![CI](https://github.com/mcrepeau/lukscrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/mcrepeau/lukscrypt/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/mcrepeau/lukscrypt/branch/main/graph/badge.svg)](https://codecov.io/gh/mcrepeau/lukscrypt)
+
 A self-hosted web UI for managing LUKS-encrypted vault files on Linux, designed to run
 as a privileged Docker container on a NAS (tested on Debian 12 / OpenMediaVault).
 
@@ -280,6 +283,8 @@ data: {"error":"luksFormat: ..."}
 ```
 
 ## Security considerations
+
+Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY.md).
 
 - **TLS is required in production** — Basic Auth is base64 plaintext; always use a
   TLS-terminating reverse proxy and never expose 8080 on untrusted networks.

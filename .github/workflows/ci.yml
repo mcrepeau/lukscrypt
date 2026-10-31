@@ -30,4 +30,12 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          # Tokenless upload works for public repos; add a CODECOV_TOKEN
+          # secret to enable uploads from forks/PRs too. Never fail CI over it.
+          fail_ci_if_error: false
