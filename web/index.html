@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LUKSCrypt</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235eead4' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='11' width='18' height='11' rx='2'/%3E%3Cpath d='M7 11V7a5 5 0 0 1 10 0v4'/%3E%3Ccircle cx='12' cy='16' r='1.5'/%3E%3C/svg%3E">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -51,6 +52,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    flex: 1; /* span the header so .logo-sub can be pushed to the right edge */
     font-size: 1.15rem;
     font-weight: 700;
     letter-spacing: -.3px;
@@ -61,7 +63,7 @@
     font-size: .75rem;
     font-weight: 400;
     color: var(--text-dim);
-    margin-left: 4px;
+    margin-left: auto; /* right-align "LUKS Vault Manager" in the top bar */
     letter-spacing: .2px;
   }
 
