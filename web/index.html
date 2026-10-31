@@ -52,20 +52,13 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    flex: 1; /* span the header so .logo-sub can be pushed to the right edge */
+    flex: 1; /* span the header so the Logout button sits at the right edge */
     font-size: 1.15rem;
     font-weight: 700;
     letter-spacing: -.3px;
     color: var(--primary);
   }
   .logo svg { width: 22px; height: 22px; }
-  .logo-sub {
-    font-size: .75rem;
-    font-weight: 400;
-    color: var(--text-dim);
-    margin-left: auto; /* right-align "LUKS Vault Manager" in the top bar */
-    letter-spacing: .2px;
-  }
 
   /* ── Main layout ── */
   main { max-width: 1100px; margin: 0 auto; padding: 2rem; }
@@ -491,7 +484,6 @@
       <circle cx="12" cy="16" r="1.5"/>
     </svg>
     LUKSCrypt
-    <span class="logo-sub">LUKS Vault Manager</span>
   </div>
   <button class="btn btn-ghost" id="logout-btn" onclick="logout()" title="End the session">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px">
