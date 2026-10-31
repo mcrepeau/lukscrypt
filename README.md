@@ -316,8 +316,12 @@ Found a vulnerability? Please report it privately — see [SECURITY.md](SECURITY
 
 ```bash
 go run .                                                            # Linux only — needs root + cryptsetup
-CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=v1.6.0" -o lukscrypt .
+CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=v1.8.0" -o lukscrypt .
 go test ./... && go vet ./...
+
+# Integration tests: real cryptsetup/loop/mount pipeline (Linux, root).
+# Skipped by default; CI runs them under sudo on ubuntu-latest.
+sudo go test -tags integration -race -v ./internal/vault/
 ```
 
 Pure-Go SQLite (modernc.org/sqlite) → fully static binary, cross-compiles cleanly to ARM64.

@@ -39,3 +39,28 @@ jobs:
           # Tokenless upload works for public repos; add a CODECOV_TOKEN
           # secret to enable uploads from forks/PRs too. Never fail CI over it.
           fail_ci_if_error: false
+
+  integration:
+    name: Integration (real cryptsetup, root)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install tools and load kernel modules
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cryptsetup e2fsprogs
+          # File-backed LUKS needs loop devices; dm-crypt needs device-mapper.
+          # GitHub runners are full VMs, so modprobe works here.
+          sudo modprobe loop || true
+          sudo modprobe dm_mod || true
+
+      - name: Run integration tests (real create/unlock/grow/keyslot/lock/delete)
+        run: sudo -E env "PATH=$PATH" go test -tags integration -race -count=1 -v ./internal/vault/
