@@ -1,6 +1,22 @@
 package vault
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+// With no loop control node (and modprobe unavailable/failing), the preflight
+// must return an actionable error instead of letting luksOpen fail cryptically.
+func TestEnsureLoopSupportMissing(t *testing.T) {
+	orig := loopControlPath
+	loopControlPath = "/nonexistent/loop-control"
+	defer func() { loopControlPath = orig }()
+	err := ensureLoopSupport(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "modprobe loop") {
+		t.Errorf("err = %v, want actionable error mentioning `modprobe loop`", err)
+	}
+}
 
 // realMounts is a representative /proc/mounts snapshot used across tests.
 // Format: <device> <mountpoint> <fstype> <options> <dump> <pass>

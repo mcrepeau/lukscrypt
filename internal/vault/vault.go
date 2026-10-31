@@ -71,6 +71,16 @@ func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int,
 		return
 	}
 
+	// Fail fast if loop devices are unavailable: file-backed LUKS attaches
+	// the image via a loop device, and luksOpen fails with a cryptic
+	// "Attaching loopback device failed" if /dev/loop-control is missing
+	// (host kernel without the loop module). Try to load it once, then
+	// report an actionable error.
+	if err := ensureLoopSupport(ctx); err != nil {
+		fail("loop device support", err)
+		return
+	}
+
 	// Fail fast if the image file already exists.
 	if _, err := os.Stat(imgPath); err == nil {
 		fail("create container file", fmt.Errorf("file %s already exists", imgPath))
@@ -174,6 +184,29 @@ func Create(ctx context.Context, database *db.DB, name, path string, sizeGB int,
 		Done:    true,
 		VaultID: vault.ID,
 	})
+}
+
+// loopControlPath is the canonical loop-device control node. A var so tests
+// can point it at a missing path.
+var loopControlPath = "/dev/loop-control"
+
+// ensureLoopSupport verifies that loop-device support is available —
+// file-backed LUKS attaches images through loop devices, so luksOpen needs
+// /dev/loop-control (created by the loop kernel module). If the node is
+// missing, try `modprobe loop` once: the container runs privileged, so this
+// loads the module on the HOST kernel. Returns an actionable error if loop
+// support is still missing.
+func ensureLoopSupport(ctx context.Context) error {
+	if _, err := os.Stat(loopControlPath); err == nil {
+		return nil
+	}
+	// Best effort — modprobe may not exist or may fail (non-host kernel);
+	// the re-check below decides.
+	exec.CommandContext(ctx, "modprobe", "loop").Run()
+	if _, err := os.Stat(loopControlPath); err == nil {
+		return nil
+	}
+	return fmt.Errorf("no loop device support (%s missing): file-backed LUKS needs loop devices — on the NAS host run `modprobe loop` once (persist with `echo loop > /etc/modules-load.d/loop.conf`), then retry vault creation", loopControlPath)
 }
 
 // allocateFile creates the backing image file. It first attempts fallocate,

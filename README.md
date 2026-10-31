@@ -37,7 +37,11 @@ Single static executable, no external file dependencies — the frontend is comp
 ## Requirements
 
 **Host (NAS):** Linux with dm-crypt/device-mapper and Docker privileged-container support
-(`cryptsetup`, `e2fsprogs`, `util-linux` ship in the image).
+(`cryptsetup`, `e2fsprogs`, `util-linux` ship in the image). The **loop module** must be
+loaded (`modprobe loop`; persist with `echo loop > /etc/modules-load.d/loop.conf`) —
+file-backed LUKS images are attached via loop devices. The app tries `modprobe loop`
+itself at vault creation (the privileged container shares the host kernel) and fails
+fast with instructions if it can't.
 **Build machine:** Go 1.22+, Docker buildx (cross-builds ARM64 for most NAS hardware).
 
 ## Deployment
@@ -117,6 +121,15 @@ with only the proxy publishing ports (proxy → `http://lukscrypt:8080`; no `por
 `propagation: shared` on the bind-mounted dirs makes container mounts visible on the
 host. If you see `mount: /mnt: mount point is not a shared mount`, run once on the NAS:
 `mount --make-shared /mnt`.
+
+### Troubleshooting
+
+- **`luksOpen (Attaching loopback device failed …)` during vault creation** — the host
+  kernel has no loop devices. On the NAS run `modprobe loop` (persist it:
+  `echo loop > /etc/modules-load.d/loop.conf`), then retry. Vault creation now checks
+  for `/dev/loop-control` up front, tries `modprobe loop` itself, and reports this
+  message directly instead of the cryptsetup error.
+- **`mount: … mount point is not a shared mount`** — see Mount propagation above.
 
 ## Configuration
 
