@@ -10,6 +10,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
@@ -188,6 +189,10 @@ func NewMux(ctx context.Context, database *db.DB, webFiles embed.FS, storageDirs
 	mux.HandleFunc("GET /api/vaults/events/{jobID}", h.vaultEvents)
 	// Logout (authed: a valid session or Basic Auth is required to reach it)
 	mux.HandleFunc("POST /logout", h.logout)
+	// API tokens — revocable credentials for scripts/curl (hashed at rest)
+	mux.HandleFunc("GET /api/tokens", h.listTokens)
+	mux.HandleFunc("POST /api/tokens", h.createToken)
+	mux.HandleFunc("DELETE /api/tokens/{id}", h.deleteToken)
 
 	authenticated := h.requestLogger(h.securityHeaders(h.csrfGuard(h.limitBody(h.auth(mux)))))
 
@@ -1384,6 +1389,130 @@ func (h *handler) validCredentials(user, pass string) bool {
 	return userMatch == 1 && passMatch == 1
 }
 
+// hashToken is the at-rest form of an API token (SHA-256 hex). The raw token
+// is shown exactly once, at creation.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// newAPIToken generates a fresh raw token (lukscrypt_ + 64 hex chars).
+func newAPIToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return "lukscrypt_" + hex.EncodeToString(b[:]), nil
+}
+
+// validAPICredentials accepts the master Basic Auth pair OR an API token —
+// as `Authorization: Bearer <token>` (no username) or as the Basic Auth
+// password with the configured username. Returns (tokenID, isToken, ok).
+func (h *handler) validAPICredentials(r *http.Request) (int64, bool, bool) {
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		tok := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if t, err := h.db.GetAPITokenByHash(hashToken(tok)); err == nil {
+			return t.ID, true, true
+		}
+		return 0, false, false
+	}
+	user, pass, ok := r.BasicAuth()
+	if !ok {
+		return 0, false, false
+	}
+	if h.validCredentials(user, pass) {
+		return 0, false, true
+	}
+	// Token used as the Basic Auth password (curl -u admin:lukscrypt_...).
+	if subtle.ConstantTimeCompare([]byte(user), []byte(h.authUser)) == 1 {
+		if t, err := h.db.GetAPITokenByHash(hashToken(pass)); err == nil {
+			return t.ID, true, true
+		}
+	}
+	return 0, false, false
+}
+
+// apiTokenResponse is the JSON shape for token endpoints. Token (the raw
+// secret) is set only on creation; TokenHash is never serialized.
+type apiTokenResponse struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+	Token      string `json:"token,omitempty"`
+}
+
+func (h *handler) listTokens(w http.ResponseWriter, r *http.Request) {
+	toks, err := h.db.ListAPITokens()
+	if err != nil {
+		jsonErr(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	resp := make([]apiTokenResponse, len(toks))
+	for i, t := range toks {
+		resp[i] = apiTokenResponse{ID: t.ID, Name: t.Name, CreatedAt: t.CreatedAt, LastUsedAt: t.LastUsedAt}
+	}
+	jsonOK(w, resp)
+}
+
+// createToken issues a new API token. The raw token is returned exactly once;
+// only its hash is stored.
+func (h *handler) createToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len(req.Name) > 64 {
+		jsonErr(w, "name is required (max 64 chars)", http.StatusBadRequest)
+		return
+	}
+	raw, err := newAPIToken()
+	if err != nil {
+		jsonErr(w, "failed to generate token", http.StatusInternalServerError)
+		return
+	}
+	t, err := h.db.CreateAPIToken(req.Name, hashToken(raw))
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			jsonErr(w, "a token with this name already exists", http.StatusConflict)
+			return
+		}
+		jsonErr(w, "failed to create token", http.StatusInternalServerError)
+		return
+	}
+	slog.Info("api token created", "name", req.Name, "token_id", t.ID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(apiTokenResponse{
+		ID: t.ID, Name: t.Name, CreatedAt: t.CreatedAt, Token: raw,
+	})
+}
+
+// deleteToken revokes a token by id.
+func (h *handler) deleteToken(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		jsonErr(w, "invalid token id", http.StatusBadRequest)
+		return
+	}
+	deleted, err := h.db.DeleteAPIToken(id)
+	if err != nil {
+		jsonErr(w, "database error", http.StatusInternalServerError)
+		return
+	}
+	if !deleted {
+		jsonErr(w, "token not found", http.StatusNotFound)
+		return
+	}
+	slog.Info("api token revoked", "token_id", id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // auth accepts either a valid session cookie (the UI path, with expiry and
 // logout) or a valid Basic Auth header (the API/script path — no session is
 // created, so curl keeps working unchanged). Failures are throttled per IP:
@@ -1396,10 +1525,14 @@ func (h *handler) auth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if user, pass, ok := r.BasicAuth(); ok && h.validCredentials(user, pass) {
+		if tokenID, isToken, ok := h.validAPICredentials(r); ok {
 			// A successful login resets this IP's failure counter, so a user who
 			// typo'd a few times is not locked out later.
 			h.clearAuthFailures(r)
+			if isToken {
+				// Best-effort audit touch; never fail the request over it.
+				h.db.TouchAPIToken(tokenID)
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

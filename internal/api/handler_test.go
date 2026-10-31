@@ -334,6 +334,103 @@ func TestSessionExpiry(t *testing.T) {
 	}
 }
 
+// --- API tokens ---------------------------------------------------------------
+
+func bearerRequest(h http.Handler, method, path, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	req.RemoteAddr = "127.0.0.1:9999"
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// Full token lifecycle: create (raw token shown once) → Bearer works →
+// Basic-with-token works → master password still works → revoke → 401.
+func TestAPITokensFlow(t *testing.T) {
+	h, _ := newTestMux(t)
+
+	w := auth(h, http.MethodPost, "/api/tokens", map[string]any{"name": "nas-backup"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: got %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		ID    int64  `json:"id"`
+		Name  string `json:"name"`
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.ID == 0 || created.Name != "nas-backup" || !strings.HasPrefix(created.Token, "lukscrypt_") {
+		t.Errorf("created = %+v", created)
+	}
+
+	// Duplicate name → 409.
+	if w := auth(h, http.MethodPost, "/api/tokens", map[string]any{"name": "nas-backup"}); w.Code != http.StatusConflict {
+		t.Errorf("duplicate name: got %d, want 409", w.Code)
+	}
+
+	// List shows metadata only — never the raw token or the hash.
+	w = auth(h, http.MethodGet, "/api/tokens", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, created.Token) || strings.Contains(body, "token_hash") {
+		t.Errorf("list response leaks token material: %s", body)
+	}
+	var list []map[string]any
+	if err := json.Unmarshal([]byte(body), &list); err != nil || len(list) != 1 || list[0]["name"] != "nas-backup" {
+		t.Errorf("list = %v, err=%v", list, err)
+	}
+
+	// Bearer token authenticates.
+	if w := bearerRequest(h, http.MethodGet, "/api/config", created.Token); w.Code != http.StatusOK {
+		t.Errorf("bearer: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	// Token as the Basic Auth password works too (curl -u admin:lukscrypt_...).
+	if w := request(h, http.MethodGet, "/api/config", "admin", created.Token, "127.0.0.1:9999", nil); w.Code != http.StatusOK {
+		t.Errorf("basic-with-token: got %d, want 200", w.Code)
+	}
+	// Master password still works.
+	if w := auth(h, http.MethodGet, "/api/config", nil); w.Code != http.StatusOK {
+		t.Errorf("master basic auth: got %d, want 200", w.Code)
+	}
+	// Wrong token → 401.
+	if w := bearerRequest(h, http.MethodGet, "/api/config", "lukscrypt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); w.Code != http.StatusUnauthorized {
+		t.Errorf("bad bearer: got %d, want 401", w.Code)
+	}
+
+	// Revoke → 204; the token stops working immediately.
+	if w := auth(h, http.MethodDelete, fmt.Sprintf("/api/tokens/%d", created.ID), nil); w.Code != http.StatusNoContent {
+		t.Fatalf("revoke: got %d, want 204", w.Code)
+	}
+	if w := bearerRequest(h, http.MethodGet, "/api/config", created.Token); w.Code != http.StatusUnauthorized {
+		t.Errorf("revoked token: got %d, want 401", w.Code)
+	}
+	if w := auth(h, http.MethodDelete, fmt.Sprintf("/api/tokens/%d", created.ID), nil); w.Code != http.StatusNotFound {
+		t.Errorf("re-revoke: got %d, want 404", w.Code)
+	}
+}
+
+func TestCreateTokenValidation(t *testing.T) {
+	h, _ := newTestMux(t)
+	tests := map[string]map[string]any{
+		"empty name":   {"name": ""},
+		"missing name": {},
+		"too long":     {"name": strings.Repeat("a", 65)},
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			w := auth(h, http.MethodPost, "/api/tokens", body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 // --- Security headers ---------------------------------------------------------
 
 func TestSecurityHeaders(t *testing.T) {

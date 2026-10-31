@@ -24,6 +24,16 @@ type Vault struct {
 	CreatedAt  string
 }
 
+// APIToken is a revocable credential for scripts/curl. Only the SHA-256 hash
+// of the raw token is stored; the raw token is shown exactly once at creation.
+type APIToken struct {
+	ID         int64
+	Name       string
+	TokenHash  string
+	CreatedAt  string
+	LastUsedAt string
+}
+
 func Open(path string) (*DB, error) {
 	conn, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -61,6 +71,16 @@ func migrate(conn *sql.DB) error {
 		mount_point TEXT NOT NULL,
 		mapper_name TEXT NOT NULL,
 		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	if err != nil {
+		return err
+	}
+	_, err = conn.Exec(`CREATE TABLE IF NOT EXISTS api_tokens (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		name         TEXT UNIQUE NOT NULL,
+		token_hash   TEXT UNIQUE NOT NULL,
+		created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+		last_used_at DATETIME
 	)`)
 	return err
 }
@@ -142,5 +162,68 @@ func (d *DB) DeleteVault(id int64) error {
 // The authoritative size is the image file on disk; this is metadata.
 func (d *DB) UpdateVaultSize(id int64, sizeGB int) error {
 	_, err := d.conn.Exec(`UPDATE vaults SET size_gb = ? WHERE id = ?`, sizeGB, id)
+	return err
+}
+
+func (d *DB) CreateAPIToken(name, tokenHash string) (*APIToken, error) {
+	res, err := d.conn.Exec(
+		`INSERT INTO api_tokens (name, token_hash) VALUES (?, ?)`, name, tokenHash,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return &APIToken{ID: id, Name: name, TokenHash: tokenHash}, nil
+}
+
+// ListAPITokens returns all tokens newest-first. Hashes are included in the
+// struct but must never be serialized to clients.
+func (d *DB) ListAPITokens() ([]APIToken, error) {
+	rows, err := d.conn.Query(
+		`SELECT id, name, token_hash, created_at, COALESCE(last_used_at,'') FROM api_tokens ORDER BY created_at DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var toks []APIToken
+	for rows.Next() {
+		var t APIToken
+		if err := rows.Scan(&t.ID, &t.Name, &t.TokenHash, &t.CreatedAt, &t.LastUsedAt); err != nil {
+			return nil, err
+		}
+		toks = append(toks, t)
+	}
+	return toks, rows.Err()
+}
+
+// GetAPITokenByHash resolves a token by its SHA-256 hex hash.
+func (d *DB) GetAPITokenByHash(hash string) (*APIToken, error) {
+	var t APIToken
+	err := d.conn.QueryRow(
+		`SELECT id, name, token_hash, created_at, COALESCE(last_used_at,'') FROM api_tokens WHERE token_hash = ?`, hash,
+	).Scan(&t.ID, &t.Name, &t.TokenHash, &t.CreatedAt, &t.LastUsedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// DeleteAPIToken removes a token; reports whether a row was actually deleted.
+func (d *DB) DeleteAPIToken(id int64) (bool, error) {
+	res, err := d.conn.Exec(`DELETE FROM api_tokens WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// TouchAPIToken records that a token was used (audit trail).
+func (d *DB) TouchAPIToken(id int64) error {
+	_, err := d.conn.Exec(`UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
 	return err
 }

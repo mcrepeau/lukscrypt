@@ -136,15 +136,24 @@ host. If you see `mount: /mnt: mount point is not a shared mount`, run once on t
 Multiple storage/mount dirs (e.g. `VAULT_STORAGE_DIRS: /vaults,/tank/encrypted`) show a
 dropdown in the UI; a single value is used automatically.
 
+### API tokens
+
+Scripts and cron jobs should not carry the master password. Create a named, revocable
+token in the UI (**API tokens** button) or via `POST /api/tokens` with `{"name": "nas-backup"}` —
+the raw token is shown **exactly once** and only its SHA-256 hash is stored. Revoke with
+`DELETE /api/tokens/{id}` (e.g. when a script is retired). Use it as
+`Authorization: Bearer <token>`, or as the Basic Auth password: `curl -u admin:<token> …`.
+The master `AUTH_USER`/`AUTH_PASSWORD` keeps working unchanged.
+
 ### Unlocking without the browser
 
 ```bash
 # find the vault's numeric id via GET /api/vaults, then:
-curl -su "$USER:$PASS" -H 'Content-Type: application/json' \
-  -d '{"password": "..."}' http://nas.local:8080/api/vaults/1/unlock
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"password": "..."}' https://lukscrypt.example.com/api/vaults/1/unlock
 # or with a keyfile that stays on your machine:
-curl -su "$USER:$PASS" -H 'Content-Type: application/json' \
-  -d "{\"key_file\": \"$(base64 -w0 vault.key)\"}" http://nas.local:8080/api/vaults/1/unlock
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"key_file\": \"$(base64 -w0 vault.key)\"}" https://lukscrypt.example.com/api/vaults/1/unlock
 ```
 
 There is **no auto-unlock by design**: a key stored anywhere the NAS can reach would be
@@ -211,6 +220,9 @@ All endpoints except `/healthz` require HTTP Basic Auth.
 | `POST` | `/api/vaults/{id}/keyslot/remove` | Yes | Remove keyslot by index with `password`/`key_file`; `409` if last valid keyslot |
 | `GET` | `/api/vaults/details/{id}` | Yes | LUKS header details — read-only, no passphrase needed |
 | `DELETE` | `/api/vaults/{id}` | Yes | Delete a locked vault (image + mount dir); `422` if still unlocked |
+| `GET` | `/api/tokens` | Yes | List API tokens (metadata only — hashes and raw tokens never returned) |
+| `POST` | `/api/tokens` | Yes | Create a token (`{"name": "..."}`); returns the raw token once (`201`), `409` on duplicate name |
+| `DELETE` | `/api/tokens/{id}` | Yes | Revoke a token (`204`, `404` if unknown) |
 
 ### Examples
 
@@ -261,6 +273,8 @@ data: {"error":"luksFormat: ..."}
   once to the logs. Failed logins are rate-limited per IP (burst 5, then 1/min,
   HTTP `429`); unlock/grow/keyslot attempts too (burst 5, then 1 per 30s).
   `X-Forwarded-For` is honored only with `TRUST_PROXY=true`, last entry only.
+- **API tokens are stored hashed** (SHA-256), shown once at creation, and individually
+  revocable — a leaked script token never requires rotating the master password.
 - **Credentials never appear in argv** — passphrases/keyfiles go to the subprocess's
   stdin (`--key-file=-` with an exact `--keyfile-size`), invisible in `/proc/<pid>/cmdline`.
   Keyfiles are never written to persistent storage (the one `0600` temp file for
