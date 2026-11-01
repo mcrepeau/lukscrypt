@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/mcrepeau/lukscrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/mcrepeau/lukscrypt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/mcrepeau/lukscrypt/branch/main/graph/badge.svg)](https://codecov.io/gh/mcrepeau/lukscrypt)
+[![Quality gate](https://sonarcloud.io/api/project_badges/quality_gate?project=mcrepeau_lukscrypt)](https://sonarcloud.io/summary/new_code?id=mcrepeau_lukscrypt)
 
 A self-hosted web UI for managing LUKS-encrypted vault files on Linux, designed to run
 as a privileged Docker container on a NAS (tested on Debian 12 / OpenMediaVault).
